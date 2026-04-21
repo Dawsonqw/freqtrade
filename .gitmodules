@@ -1,0 +1,3 @@
+[submodule "crypto-monitor"]
+	path = crypto-monitor
+	url = git@github.com:Dawsonqw/crypto-monitor.git
