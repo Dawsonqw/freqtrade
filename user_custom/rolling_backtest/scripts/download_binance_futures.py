@@ -7,6 +7,8 @@ import json
 import logging
 import os
 import sys
+import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -30,11 +32,23 @@ logging.basicConfig(
 logger = logging.getLogger("download_binance_futures")
 
 
+@dataclass
+class BatchFailure:
+    timeframe: str
+    batch_start_pair: str
+    batch_end_pair: str
+    error: str
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Download Binance futures OHLCV in batches")
     p.add_argument("--data-dir", default="/data/freqtrade_data", help="freqtrade datadir")
     p.add_argument("--meta-dir", default="/data/freqtrade_data/_meta", help="metadata output directory")
-    p.add_argument("--endpoint", default="https://demo-fapi.binance.com", help="Binance API base")
+    p.add_argument(
+        "--endpoint",
+        default="https://fapi.binance.com",
+        help="Binance endpoint for symbol discovery (exchangeInfo)",
+    )
     p.add_argument("--quote", default="USDT", help="Quote asset")
     p.add_argument("--years", type=int, default=5, help="Lookback years")
     p.add_argument("--timeframes", nargs="+", default=["5m", "15m", "1h", "4h", "1d", "1w"])
@@ -43,7 +57,46 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--manifest-only", action="store_true")
     p.add_argument("--coverage-only", action="store_true")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument(
+        "--candle-types",
+        nargs="+",
+        default=["futures"],
+        choices=["futures", "mark", "index", "premiumindex", "funding_rate"],
+        help="Candle types to download. Default only futures to avoid unnecessary funding-rate 403.",
+    )
+    p.add_argument("--prepend", action="store_true", help="Prepend older data before existing local start")
+    p.add_argument("--erase", action="store_true", help="Erase local data and redownload")
+    p.add_argument("--retries", type=int, default=3, help="Retries per batch on transient API errors")
+    p.add_argument("--retry-sleep", type=float, default=2.0, help="Base sleep seconds for retry backoff")
+    p.add_argument("--sleep-between-batches", type=float, default=0.0, help="Throttle between batches")
+    p.add_argument(
+        "--continue-on-error",
+        action="store_true",
+        default=True,
+        help="Continue downloading remaining batches when one batch fails",
+    )
+    p.add_argument(
+        "--report-json",
+        default=None,
+        help="Optional report path. Default: <meta-dir>/download_report.json",
+    )
+    p.add_argument(
+        "--strict-failures",
+        action="store_true",
+        help="Exit non-zero if any batch fails.",
+    )
     return p.parse_args()
+
+
+def _parse_candle_types(values: list[str]) -> list[CandleType]:
+    mapping = {
+        "futures": CandleType.FUTURES,
+        "mark": CandleType.MARK,
+        "index": CandleType.INDEX,
+        "premiumindex": CandleType.PREMIUMINDEX,
+        "funding_rate": CandleType.FUNDING_RATE,
+    }
+    return [mapping[v] for v in values]
 
 
 def fetch_exchange_info(endpoint: str) -> dict[str, Any]:
@@ -57,10 +110,12 @@ def fetch_exchange_info(endpoint: str) -> dict[str, Any]:
 def build_download_config(
     *,
     data_dir: Path,
-    endpoint: str,
     pairs: list[str],
     timeframe: str,
     timerange: str,
+    candle_types: list[CandleType],
+    prepend: bool,
+    erase: bool,
 ) -> dict[str, Any]:
     key = os.getenv("BINANCE_API_KEY", "")
     secret = os.getenv("BINANCE_API_SECRET", "")
@@ -79,6 +134,9 @@ def build_download_config(
         "timeframes": [timeframe],
         "timerange": timerange,
         "datadir": data_dir,
+        "prepend_data": prepend,
+        "erase": erase,
+        "candle_types": candle_types,
         "exchange": {
             "name": "binance",
             "key": key,
@@ -90,13 +148,6 @@ def build_download_config(
                 "options": {
                     "defaultType": "future",
                     "adjustForTimeDifference": True,
-                },
-                # keep public endpoint aligned with requested demo endpoint
-                "urls": {
-                    "api": {
-                        "fapiPublic": f"{endpoint.rstrip('/')}/fapi/v1",
-                        "fapiPrivate": f"{endpoint.rstrip('/')}/fapi/v1",
-                    }
                 },
             },
         },
@@ -129,12 +180,40 @@ def chunked(seq: list[str], size: int):
         yield seq[i : i + size]
 
 
+def run_batch_with_retry(cfg: dict[str, Any], retries: int, retry_sleep: float) -> None:
+    last_error: Exception | None = None
+    for attempt in range(1, retries + 1):
+        try:
+            exchange = ExchangeResolver.load_exchange(cfg, validate=False)
+            download_data(cfg, exchange)
+            return
+        except Exception as exc:  # noqa: BLE001 - want to keep batch pipeline running
+            last_error = exc
+            if attempt >= retries:
+                break
+            wait = retry_sleep * (2 ** (attempt - 1))
+            logger.warning(
+                "Batch failed (attempt %s/%s): %s. retry in %.1fs",
+                attempt,
+                retries,
+                exc,
+                wait,
+            )
+            time.sleep(wait)
+
+    assert last_error is not None
+    raise last_error
+
+
 def main() -> None:
     args = parse_args()
     data_dir = Path(args.data_dir)
     meta_dir = Path(args.meta_dir)
     data_dir.mkdir(parents=True, exist_ok=True)
     meta_dir.mkdir(parents=True, exist_ok=True)
+
+    report_json = Path(args.report_json) if args.report_json else (meta_dir / "download_report.json")
+    candle_types = _parse_candle_types(args.candle_types)
 
     manifest_path = meta_dir / "binance_futures_manifest.csv"
     coverage_path = meta_dir / "binance_futures_coverage.csv"
@@ -153,30 +232,34 @@ def main() -> None:
     if args.manifest_only:
         return
 
+    failures: list[BatchFailure] = []
+
     if args.coverage_only:
         logger.info("Coverage-only mode; skip download.")
     else:
         by_pair = {r.pair: r for r in rows}
         all_pairs = sorted(by_pair.keys())
         logger.info(
-            "Start download: pairs=%s, timeframes=%s, batch_size=%s",
+            "Start download: pairs=%s, timeframes=%s, batch_size=%s, candle_types=%s",
             len(all_pairs),
             args.timeframes,
             args.batch_size,
+            [c.value for c in candle_types],
         )
 
         for tf in args.timeframes:
             for batch in chunked(all_pairs, args.batch_size):
-                # global earliest start in this batch; pairs listed later naturally return shorter data
                 min_start = min(by_pair[p].planned_start for p in batch)
                 timerange = f"{int(min_start.timestamp())}-"
 
                 cfg = build_download_config(
                     data_dir=data_dir,
-                    endpoint=args.endpoint,
                     pairs=batch,
                     timeframe=tf,
                     timerange=timerange,
+                    candle_types=candle_types,
+                    prepend=args.prepend,
+                    erase=args.erase,
                 )
 
                 logger.info(
@@ -191,8 +274,23 @@ def main() -> None:
                 if args.dry_run:
                     continue
 
-                exchange = ExchangeResolver.load_exchange(cfg, validate=False)
-                download_data(cfg, exchange)
+                try:
+                    run_batch_with_retry(cfg, retries=args.retries, retry_sleep=args.retry_sleep)
+                except Exception as exc:  # noqa: BLE001
+                    failures.append(
+                        BatchFailure(
+                            timeframe=tf,
+                            batch_start_pair=batch[0],
+                            batch_end_pair=batch[-1],
+                            error=str(exc),
+                        )
+                    )
+                    logger.exception("Batch failed: timeframe=%s %s..%s", tf, batch[0], batch[-1])
+                    if not args.continue_on_error:
+                        raise
+
+                if args.sleep_between_batches > 0:
+                    time.sleep(args.sleep_between_batches)
 
     write_coverage(data_dir=data_dir, manifest_rows=rows, timeframes=args.timeframes, out_csv=coverage_path)
     logger.info("Coverage written: %s", coverage_path)
@@ -200,10 +298,22 @@ def main() -> None:
     summary = {
         "manifest": str(manifest_path),
         "coverage": str(coverage_path),
+        "report": str(report_json),
         "pair_count": len(rows),
         "timeframes": args.timeframes,
+        "candle_types": [c.value for c in candle_types],
+        "prepend": bool(args.prepend),
+        "erase": bool(args.erase),
+        "failures": [f.__dict__ for f in failures],
+        "failure_count": len(failures),
     }
+    report_json.parent.mkdir(parents=True, exist_ok=True)
+    report_json.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+
     print(json.dumps(summary, ensure_ascii=False, indent=2))
+
+    if args.strict_failures and failures:
+        raise SystemExit(2)
 
 
 if __name__ == "__main__":

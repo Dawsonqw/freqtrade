@@ -39,12 +39,15 @@
 python user_custom/rolling_backtest/scripts/download_binance_futures.py \
   --data-dir /data/freqtrade_data \
   --meta-dir /data/freqtrade_data/_meta \
-  --endpoint https://demo-fapi.binance.com \
+  --endpoint https://fapi.binance.com \
   --quote USDT \
   --timeframes 5m 15m 1h 4h 1d 1w \
   --years 5 \
   --batch-size 10 \
-  --max-pairs 10
+  --max-pairs 10 \
+  --candle-types futures \
+  --prepend \
+  --retries 3
 ```
 
 2. 大批量后台下载（全量）：
@@ -66,7 +69,8 @@ python user_custom/rolling_backtest/scripts/run_rolling_backtest.py \
   --datadir /data/freqtrade_data \
   --user-data-dir /root/workspace/freqtrade/user_data \
   --output-json user_custom/rolling_backtest/output/rolling_backtest_result.json \
-  --log-file user_custom/rolling_backtest/output/rolling_backtest.log
+  --log-file user_custom/rolling_backtest/output/rolling_backtest.log \
+  --max-failed-windows 2
 ```
 
 4. 原生 freqtrade 回测（同策略/同数据）并做一致性对比：
@@ -93,3 +97,18 @@ python user_custom/rolling_backtest/scripts/compare_parity.py \
 `parity_report.json` 关键字段：
 - `checks.trade_digest_match`
 - `checks.final_balance_within_tol`
+
+5. 数据完整性校验（下载完成后执行）：
+
+```bash
+python user_custom/rolling_backtest/scripts/check_data_integrity.py \
+  --data-dir /data/freqtrade_data \
+  --meta-dir /data/freqtrade_data/_meta \
+  --timeframes 5m 15m 1h 4h 1d 1w \
+  --min-coverage 0.95 \
+  --grace-candles 200
+```
+
+输出：
+- `/data/freqtrade_data/_meta/integrity_report.csv`
+- `/data/freqtrade_data/_meta/integrity_summary.json`
