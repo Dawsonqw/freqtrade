@@ -4,7 +4,6 @@ import gc
 import json
 import logging
 from dataclasses import asdict, dataclass
-from datetime import datetime
 from pathlib import Path
 
 from pandas import DataFrame
@@ -36,6 +35,8 @@ class WindowRunStat:
     trades_after_window: int
     open_trades_after_window: int
     duration_sec: float
+    status: str
+    error: str | None = None
 
 
 class RollingBacktestRunner:
@@ -80,6 +81,21 @@ class RollingBacktestRunner:
 
         raw_data = self._load_window_data(window.timerange)
         if not raw_data:
+            t1 = dt_now()
+            self.window_stats.append(
+                WindowRunStat(
+                    index=window.index,
+                    start=window.start.isoformat(),
+                    end=window.end.isoformat(),
+                    pairs_loaded=0,
+                    candles_total=0,
+                    trades_after_window=len(LocalTrade.bt_trades),
+                    open_trades_after_window=len(LocalTrade.bt_trades_open),
+                    duration_sec=round((t1 - t0).total_seconds(), 3),
+                    status="no_data",
+                    error=None,
+                )
+            )
             logger.warning(
                 "[window %s] no data in %s -> %s",
                 window.index,
@@ -95,6 +111,21 @@ class RollingBacktestRunner:
         # 2) trim to the actual window for signal generation (startup is handled by trim)
         preprocessed_tmp = trim_dataframes(preprocessed, window.timerange, self.bt.required_startup)
         if not preprocessed_tmp:
+            t1 = dt_now()
+            self.window_stats.append(
+                WindowRunStat(
+                    index=window.index,
+                    start=window.start.isoformat(),
+                    end=window.end.isoformat(),
+                    pairs_loaded=0,
+                    candles_total=0,
+                    trades_after_window=len(LocalTrade.bt_trades),
+                    open_trades_after_window=len(LocalTrade.bt_trades_open),
+                    duration_sec=round((t1 - t0).total_seconds(), 3),
+                    status="no_data",
+                    error="empty after startup trim",
+                )
+            )
             logger.warning("[window %s] empty after startup trim", window.index)
             return
 
@@ -131,6 +162,8 @@ class RollingBacktestRunner:
                 trades_after_window=len(LocalTrade.bt_trades),
                 open_trades_after_window=len(LocalTrade.bt_trades_open),
                 duration_sec=round((t1 - t0).total_seconds(), 3),
+                status="ok",
+                error=None,
             )
         )
 
@@ -156,7 +189,13 @@ class RollingBacktestRunner:
         self.bt.dataprovider.clear_cache()
         gc.collect()
 
-    def run(self, output_json: Path | None = None) -> dict:
+    def run(
+        self,
+        output_json: Path | None = None,
+        *,
+        fail_fast: bool = False,
+        max_failed_windows: int = 0,
+    ) -> dict:
         if not self.bt.strategylist:
             raise RuntimeError("No strategy loaded.")
         if len(self.bt.strategylist) > 1:
@@ -183,12 +222,44 @@ class RollingBacktestRunner:
         )
 
         started_at = dt_now()
+        failed_count = 0
+
         for idx, window in enumerate(windows):
-            self._run_single_window(window=window, is_last_window=(idx == len(windows) - 1))
+            try:
+                self._run_single_window(window=window, is_last_window=(idx == len(windows) - 1))
+            except Exception as exc:  # noqa: BLE001
+                failed_count += 1
+                self.window_stats.append(
+                    WindowRunStat(
+                        index=window.index,
+                        start=window.start.isoformat(),
+                        end=window.end.isoformat(),
+                        pairs_loaded=0,
+                        candles_total=0,
+                        trades_after_window=len(LocalTrade.bt_trades),
+                        open_trades_after_window=len(LocalTrade.bt_trades_open),
+                        duration_sec=0.0,
+                        status="error",
+                        error=str(exc),
+                    )
+                )
+                logger.exception("[window %s] failed", window.index)
+                if fail_fast:
+                    raise
+                if max_failed_windows > 0 and failed_count > max_failed_windows:
+                    raise RuntimeError(
+                        f"Failed windows exceeded max_failed_windows={max_failed_windows}"
+                    )
 
         ended_at = dt_now()
         trades_df = trade_list_to_dataframe(LocalTrade.bt_trades)
         final_balance = self.bt.wallets.get_total(strat.config["stake_currency"])
+
+        status_counts = {
+            "ok": sum(1 for x in self.window_stats if x.status == "ok"),
+            "no_data": sum(1 for x in self.window_stats if x.status == "no_data"),
+            "error": sum(1 for x in self.window_stats if x.status == "error"),
+        }
 
         result = {
             "strategy": strat.get_strategy_name(),
@@ -200,6 +271,9 @@ class RollingBacktestRunner:
             "windows": [asdict(x) for x in self.window_stats],
             "summary": {
                 "total_windows": len(windows),
+                "ok_windows": status_counts["ok"],
+                "no_data_windows": status_counts["no_data"],
+                "failed_windows": status_counts["error"],
                 "total_trades": int(len(trades_df)),
                 "open_trades_end": int(len(LocalTrade.bt_trades_open)),
                 "final_balance": float(final_balance),

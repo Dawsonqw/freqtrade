@@ -37,6 +37,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--pairs-file", default=None, help="CSV/TXT with pair list")
     p.add_argument("--output-json", default="user_custom/rolling_backtest/output/rolling_backtest_result.json")
     p.add_argument("--log-file", default=None)
+    p.add_argument("--fail-fast", action="store_true", help="Stop immediately when a window fails")
+    p.add_argument(
+        "--max-failed-windows",
+        type=int,
+        default=0,
+        help="Abort when failed window count exceeds this threshold (0 = unlimited)",
+    )
     return p.parse_args()
 
 
@@ -105,7 +112,11 @@ def main() -> None:
 
     backtesting = Backtesting(config)
     runner = RollingBacktestRunner(backtesting=backtesting, window_days=ns.window_days)
-    result = runner.run(output_json=Path(ns.output_json))
+    result = runner.run(
+        output_json=Path(ns.output_json),
+        fail_fast=ns.fail_fast,
+        max_failed_windows=ns.max_failed_windows,
+    )
 
     print(json.dumps(result["summary"], ensure_ascii=False, indent=2))
 
