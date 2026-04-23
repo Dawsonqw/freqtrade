@@ -1,0 +1,7 @@
+output/
+*.log
+*.tmp
+*.pid
+.env
+.env.*
+__pycache__/
