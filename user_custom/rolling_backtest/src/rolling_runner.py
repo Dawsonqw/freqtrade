@@ -19,6 +19,7 @@ from freqtrade.persistence import LocalTrade
 from freqtrade.util import dt_now
 from freqtrade.util.datetime_helpers import dt_ts
 
+from .parity_tools import compute_trade_digest
 from .windowing import Window, build_windows
 
 
@@ -202,6 +203,7 @@ class RollingBacktestRunner:
                 "total_trades": int(len(trades_df)),
                 "open_trades_end": int(len(LocalTrade.bt_trades_open)),
                 "final_balance": float(final_balance),
+                "trade_digest": compute_trade_digest(trades_df),
                 "start_ts": dt_ts(started_at),
                 "end_ts": dt_ts(ended_at),
                 "duration_sec": round((ended_at - started_at).total_seconds(), 3),

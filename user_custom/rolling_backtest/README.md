@@ -68,3 +68,28 @@ python user_custom/rolling_backtest/scripts/run_rolling_backtest.py \
   --output-json user_custom/rolling_backtest/output/rolling_backtest_result.json \
   --log-file user_custom/rolling_backtest/output/rolling_backtest.log
 ```
+
+4. 原生 freqtrade 回测（同策略/同数据）并做一致性对比：
+
+```bash
+# 原生回测（输出 zip 结果）
+python -m freqtrade backtesting \
+  --config user_custom/rolling_backtest/config/rolling_backtest_config.example.json \
+  --strategy RollingSmokeStrategy \
+  --timerange 20260101-20260401 \
+  --pairs BTC/USDT:USDT \
+  --datadir /data/freqtrade_data \
+  --user-data-dir /root/workspace/freqtrade/user_data \
+  --export trades
+
+# 滚动 vs 原生一致性检查
+python user_custom/rolling_backtest/scripts/compare_parity.py \
+  --rolling-json user_custom/rolling_backtest/output/parity_rolling_result.json \
+  --native-json /root/workspace/freqtrade/user_data/backtest_results/backtest-result-2026-04-23_15-30-40.zip \
+  --strategy RollingSmokeStrategy \
+  --output-json user_custom/rolling_backtest/output/parity_report.json
+```
+
+`parity_report.json` 关键字段：
+- `checks.trade_digest_match`
+- `checks.final_balance_within_tol`
