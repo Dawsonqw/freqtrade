@@ -73,6 +73,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Generate profit plot (HTML) after backtest completes",
     )
+    p.add_argument(
+        "--export-signals",
+        action="store_true",
+        help="Export entry/exit signals per window and detect deviations",
+    )
     return p.parse_args()
 
 
@@ -148,6 +153,7 @@ def main() -> None:
         max_failed_windows=ns.max_failed_windows,
         export=ns.export,
         plot=ns.plot,
+        export_signals=ns.export_signals,
     )
 
     print(json.dumps(result["summary"], ensure_ascii=False, indent=2))

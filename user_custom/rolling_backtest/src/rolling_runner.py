@@ -23,6 +23,7 @@ from freqtrade.util import dt_now
 from freqtrade.util.datetime_helpers import dt_ts
 
 from .parity_tools import compute_trade_digest
+from .signal_export import SignalExporter
 from .windowing import Window, build_windows
 
 
@@ -55,6 +56,27 @@ class RollingBacktestRunner:
         self.bt = backtesting
         self.window_days = window_days
         self.window_stats: list[WindowRunStat] = []
+        self._dynamic_pairlist = self.bt.config.get("enable_dynamic_pairlist", False)
+
+    def _refresh_pairlist_for_window(self, window: Window) -> list[str]:
+        """Refresh pairlist at the start of each window (dynamic pairlist mode).
+
+        In dynamic mode, calls pairlists.refresh_pairlist() using available data
+        for the window so filters like VolumePairList can re-rank pairs.
+        Returns the active whitelist for this window.
+        """
+        if not self._dynamic_pairlist or not self.bt.pairlists:
+            return self.bt.pairlists.whitelist
+
+        # Refresh with available pairs so filters can rank/filter
+        self.bt.pairlists.refresh_pairlist(pairs=self.bt.available_pairs or None)
+        whitelist = self.bt.pairlists.whitelist
+        logger.info(
+            "[window %s] dynamic pairlist refreshed: %d pairs",
+            window.index,
+            len(whitelist),
+        )
+        return whitelist
 
     def _load_window_data(self, tr: TimeRange) -> dict[str, DataFrame]:
         data = history.load_data(
@@ -79,9 +101,13 @@ class RollingBacktestRunner:
         *,
         window: Window,
         is_last_window: bool,
+        signal_exporter: SignalExporter | None = None,
     ) -> None:
         t0 = dt_now()
         self.bt.timerange = window.timerange
+
+        # Dynamic pairlist: refresh before loading data
+        active_pairs = self._refresh_pairlist_for_window(window)
 
         raw_data = self._load_window_data(window.timerange)
         if not raw_data:
@@ -112,6 +138,11 @@ class RollingBacktestRunner:
 
         # 1) indicators
         preprocessed = self.bt.strategy.advise_all_indicators(raw_data)
+
+        # Collect signals if exporter is active
+        if signal_exporter is not None:
+            signal_exporter.collect_window(window.index, preprocessed)
+
         # 2) trim to the actual window for signal generation (startup is handled by trim)
         preprocessed_tmp = trim_dataframes(preprocessed, window.timerange, self.bt.required_startup)
         if not preprocessed_tmp:
@@ -201,6 +232,7 @@ class RollingBacktestRunner:
         max_failed_windows: int = 0,
         export: str = "none",
         plot: bool = False,
+        export_signals: bool = False,
     ) -> dict:
         """Run rolling backtest for all loaded strategies.
 
@@ -221,6 +253,7 @@ class RollingBacktestRunner:
                 strat=strat,
                 fail_fast=fail_fast,
                 max_failed_windows=max_failed_windows,
+                export_signals=export_signals,
             )
             all_strategy_results.append(strat_result)
             if bt_content is not None:
@@ -272,6 +305,7 @@ class RollingBacktestRunner:
         strat,
         fail_fast: bool,
         max_failed_windows: int,
+        export_signals: bool = False,
     ) -> tuple[dict, dict | None]:
         """Run rolling backtest for a single strategy.
 
@@ -282,6 +316,12 @@ class RollingBacktestRunner:
         self.bt.reset_backtest(self.bt.enable_protections)
         self.bt.wallets.update()
         self.window_stats = []  # reset per strategy
+
+        # Signal exporter (optional)
+        signal_exporter: SignalExporter | None = None
+        if export_signals:
+            output_dir = Path(self.bt.config.get("user_data_dir", "user_data")) / "backtest_results"
+            signal_exporter = SignalExporter(output_dir / f"signals_{strategy_name}")
 
         windows = build_windows(
             self.bt.timerange,
@@ -303,7 +343,11 @@ class RollingBacktestRunner:
 
         for idx, window in enumerate(windows):
             try:
-                self._run_single_window(window=window, is_last_window=(idx == len(windows) - 1))
+                self._run_single_window(
+                    window=window,
+                    is_last_window=(idx == len(windows) - 1),
+                    signal_exporter=signal_exporter,
+                )
             except Exception as exc:  # noqa: BLE001
                 failed_count += 1
                 self.window_stats.append(
@@ -392,6 +436,11 @@ class RollingBacktestRunner:
 
         # Print per-window rolling performance table
         self._print_window_summary_table(strategy_name, strat.config.get("stake_currency", ""))
+
+        # Export signals and detect deviations if enabled
+        if signal_exporter is not None:
+            signal_exporter.export()
+            signal_exporter.export_deviations()
 
         return strat_result, bt_content
 
