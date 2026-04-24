@@ -124,7 +124,11 @@ class WFOEngine:
             )
 
         # Step 2: Initialize backtesting + optimizer (once, reused across folds)
+        # Inject spaces into config so HyperOptableStrategy.in_space works
+        self.config["spaces"] = self.spaces
         bt = Backtesting(self.config)
+        # Bind strategy to backtesting (normally done inside backtest_one_strategy)
+        bt._set_strategy(bt.strategylist[0])
         try:
             optimizer = WFOOptimizer(
                 bt,

@@ -13,6 +13,7 @@ from freqtrade.configuration import TimeRange
 from freqtrade.data import history
 from freqtrade.data.btanalysis import get_tick_size_over_time
 from freqtrade.data.converter import trim_dataframes
+from freqtrade.enums import CandleType, TradingMode
 from freqtrade.optimize.backtesting import Backtesting
 from freqtrade.optimize.optimize_reports import generate_strategy_stats
 from freqtrade.resolvers.hyperopt_resolver import HyperOptLossResolver
@@ -83,6 +84,63 @@ class WFOOptimizer:
         preprocessed = self.bt.strategy.advise_all_indicators(data)
         preprocessed = trim_dataframes(preprocessed, timerange, self.bt.required_startup)
 
+        # Load futures funding/mark data if in futures mode
+        if self.bt.trading_mode == TradingMode.FUTURES:
+            from freqtrade.exchange.exchange import timeframe_to_seconds
+            funding_fee_tf = self.bt.exchange.get_option("funding_fee_timeframe")
+            mark_tf = self.bt.exchange.get_option("mark_ohlcv_timeframe")
+            self.bt.funding_fee_timeframe_secs = timeframe_to_seconds(funding_fee_tf)
+
+            funding_rates = history.load_data(
+                datadir=self.bt.config["datadir"],
+                pairs=self.bt.pairlists.whitelist,
+                timeframe=funding_fee_tf,
+                timerange=timerange,
+                startup_candles=0,
+                fail_without_data=False,
+                fill_up_missing=False,
+                data_format=self.bt.config.get("dataformat_ohlcv", "feather"),
+                candle_type=CandleType.FUNDING_RATE,
+            )
+            mark_rates = history.load_data(
+                datadir=self.bt.config["datadir"],
+                pairs=self.bt.pairlists.whitelist,
+                timeframe=mark_tf,
+                timerange=timerange,
+                startup_candles=0,
+                fail_without_data=False,
+                fill_up_missing=False,
+                data_format=self.bt.config.get("dataformat_ohlcv", "feather"),
+                candle_type=CandleType.from_string(
+                    self.bt.exchange.get_option("mark_ohlcv_price")
+                ),
+            )
+            self.bt.futures_data = {}
+            funding_rate_cfg = self.bt.config.get("futures_funding_rate", None)
+            for pair in self.bt.pairlists.whitelist:
+                if pair in funding_rates and pair in mark_rates:
+                    self.bt.futures_data[pair] = self.bt.exchange.combine_funding_and_mark(
+                        funding_rates=funding_rates[pair],
+                        mark_rates=mark_rates[pair],
+                        futures_funding_rate=funding_rate_cfg,
+                    )
+                else:
+                    logger.warning(
+                        "No funding/mark data for %s — using futures_funding_rate=0", pair,
+                    )
+                    # Create minimal futures_data so backtest won't KeyError
+                    import pandas as pd
+                    ohlcv = data.get(pair)
+                    if ohlcv is not None:
+                        ff = pd.DataFrame({
+                            "date": ohlcv["date"],
+                            "open_fund": 0.0,
+                            "open_mark": ohlcv["open"],
+                        })
+                        self.bt.futures_data[pair] = ff
+        else:
+            self.bt.futures_data = {}
+
         min_date, max_date = history.get_timerange(preprocessed)
         return preprocessed, min_date, max_date
 
@@ -109,7 +167,7 @@ class WFOOptimizer:
         """Get optuna search space from strategy hyperopt parameters."""
         dimensions = {}
         for attr_name, attr in self.bt.strategy.enumerate_parameters():
-            if attr.in_space and attr.optimize:
+            if attr.optimize:
                 if hasattr(attr, "low") and hasattr(attr, "high"):
                     if hasattr(attr, "decimals"):
                         dimensions[attr_name] = {
@@ -180,6 +238,9 @@ class WFOOptimizer:
             bt_results = self.bt.backtest(
                 processed=processed, start_date=min_date, end_date=max_date,
             )
+            # Inject fields expected by generate_strategy_stats
+            bt_results.setdefault("backtest_start_time", int(min_date.timestamp()))
+            bt_results.setdefault("backtest_end_time", int(max_date.timestamp()))
 
             # Calculate loss
             strat_stats = generate_strategy_stats(
