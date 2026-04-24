@@ -45,6 +45,7 @@ class WindowRunStat:
     duration_sec: float
     status: str
     error: str | None = None
+    carry_over_trades: int = 0
 
 
 class RollingBacktestRunner:
@@ -99,6 +100,37 @@ class RollingBacktestRunner:
             self.bt.available_pairs.append(pair)
         return data
 
+    def _get_extended_timerange_for_open_trades(self, window: Window) -> TimeRange:
+        """Extend window start to cover all open trades' entry points.
+
+        This ensures indicators are calculated continuously for positions
+        that span window boundaries, eliminating ±1 trade deviations.
+        """
+        open_trades = LocalTrade.bt_trades_open
+        if not open_trades:
+            return window.timerange
+
+        # Find earliest open_date among current open trades
+        earliest_open = min(t.open_date for t in open_trades)
+
+        window_start_dt = window.start
+        if earliest_open < window_start_dt:
+            # Extend start to cover the earliest open trade
+            extended_start_ts = int(earliest_open.timestamp())
+            logger.info(
+                "[window %s] extending data load start from %s to %s to cover %d open trades",
+                window.index,
+                window_start_dt.isoformat(),
+                earliest_open.isoformat(),
+                len(open_trades),
+            )
+            return TimeRange(
+                "date", "date",
+                extended_start_ts,
+                int(window.end.timestamp()),
+            )
+        return window.timerange
+
     def _run_single_window(
         self,
         *,
@@ -109,10 +141,15 @@ class RollingBacktestRunner:
         t0 = dt_now()
         self.bt.timerange = window.timerange
 
+        # Record carry-over trades from previous window
+        carry_over = len(LocalTrade.bt_trades_open)
+
         # Dynamic pairlist: refresh before loading data
         active_pairs = self._refresh_pairlist_for_window(window)
 
-        raw_data = self._load_window_data(window.timerange)
+        # Extend data load range to cover open trades' entry points
+        effective_tr = self._get_extended_timerange_for_open_trades(window)
+        raw_data = self._load_window_data(effective_tr)
         if not raw_data:
             t1 = dt_now()
             self.window_stats.append(
@@ -202,6 +239,7 @@ class RollingBacktestRunner:
                 duration_sec=round((t1 - t0).total_seconds(), 3),
                 status="ok",
                 error=None,
+                carry_over_trades=carry_over,
             )
         )
 
