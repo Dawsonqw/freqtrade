@@ -68,6 +68,11 @@ def parse_args() -> argparse.Namespace:
         choices=["day", "week", "month"],
         help="Show profit breakdown per period (day/week/month)",
     )
+    p.add_argument(
+        "--plot",
+        action="store_true",
+        help="Generate profit plot (HTML) after backtest completes",
+    )
     return p.parse_args()
 
 
@@ -142,6 +147,7 @@ def main() -> None:
         fail_fast=ns.fail_fast,
         max_failed_windows=ns.max_failed_windows,
         export=ns.export,
+        plot=ns.plot,
     )
 
     print(json.dumps(result["summary"], ensure_ascii=False, indent=2))

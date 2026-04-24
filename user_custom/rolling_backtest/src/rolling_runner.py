@@ -200,6 +200,7 @@ class RollingBacktestRunner:
         fail_fast: bool = False,
         max_failed_windows: int = 0,
         export: str = "none",
+        plot: bool = False,
     ) -> dict:
         """Run rolling backtest for all loaded strategies.
 
@@ -260,6 +261,7 @@ class RollingBacktestRunner:
                 started_at=global_started_at,
                 ended_at=global_ended_at,
                 export=export,
+                plot=plot,
             )
 
         return result
@@ -427,8 +429,9 @@ class RollingBacktestRunner:
         started_at: datetime,
         ended_at: datetime,
         export: str,
+        plot: bool = False,
     ) -> None:
-        """Generate freqtrade-standard backtest stats, console output, and ZIP export."""
+        """Generate freqtrade-standard backtest stats, console output, ZIP export, and plots."""
 
         # Load data for market_change calculation
         full_tr = TimeRange.parse_timerange(
@@ -484,9 +487,50 @@ class RollingBacktestRunner:
                     strategy_files=strategy_files or None,
                 )
                 logger.info("Standard backtest results stored to: %s", outpath)
+
+            # Generate profit plot if requested
+            if plot:
+                self._generate_plots(btdata, all_bt_content, min_date, max_date)
         except Exception as exc:  # noqa: BLE001
             logger.exception("Failed to generate standard reports: %s", exc)
         finally:
             # Clean up loaded data
             del btdata
             gc.collect()
+
+    def _generate_plots(
+        self,
+        btdata: dict[str, DataFrame],
+        all_bt_content: dict,
+        min_date: datetime,
+        max_date: datetime,
+    ) -> None:
+        """Generate profit plot for each strategy."""
+        try:
+            from freqtrade.plot.plotting import generate_profit_graph, store_plot_file
+        except ImportError:
+            logger.warning("plotly not installed — skipping plot generation. pip install plotly")
+            return
+
+        plot_dir = Path(self.bt.config.get("user_data_dir", "user_data")) / "plot"
+        plot_dir.mkdir(parents=True, exist_ok=True)
+        stake_currency = self.bt.config.get("stake_currency", "USDT")
+
+        for strategy_name, content in all_bt_content.items():
+            trades_df = content["results"]
+            if trades_df.empty:
+                logger.info("[%s] No trades — skipping plot.", strategy_name)
+                continue
+
+            starting_balance = self.bt.config.get("dry_run_wallet", 1000.0)
+            fig = generate_profit_graph(
+                pairs=self.bt.pairlists.whitelist,
+                data=btdata,
+                trades=trades_df,
+                timeframe=self.bt.timeframe,
+                stake_currency=stake_currency,
+                starting_balance=starting_balance,
+            )
+            filename = f"rolling-profit-{strategy_name}.html"
+            store_plot_file(fig, filename, directory=plot_dir, auto_open=False)
+            logger.info("[%s] Profit plot saved: %s", strategy_name, plot_dir / filename)
