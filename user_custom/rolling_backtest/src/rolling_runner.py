@@ -24,6 +24,7 @@ from freqtrade.util.datetime_helpers import dt_ts
 
 import numpy as np
 
+from .comparison_report import build_comparison_report, format_comparison_table
 from .parity_tools import compute_trade_digest
 from .signal_export import SignalExporter
 from .window_metrics import WindowPerformance, compute_all_window_performances
@@ -317,6 +318,21 @@ class RollingBacktestRunner:
                     ),
                 },
             }
+
+        # Multi-strategy comparison report
+        if len(all_strategy_results) > 1:
+            strat_perfs = {}
+            for sr in all_strategy_results:
+                sname = sr["strategy"]
+                if "window_performances" in sr:
+                    perfs = [WindowPerformance(**wp) for wp in sr["window_performances"]]
+                    strat_perfs[sname] = perfs
+
+            if strat_perfs:
+                comparison = build_comparison_report(strat_perfs)
+                table = format_comparison_table(comparison)
+                print(table)
+                result["comparison"] = comparison.to_dict()
 
         if output_json:
             output_json.parent.mkdir(parents=True, exist_ok=True)

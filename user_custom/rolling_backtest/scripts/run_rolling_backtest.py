@@ -78,6 +78,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Export entry/exit signals per window and detect deviations",
     )
+    p.add_argument(
+        "--window-metrics",
+        action="store_true",
+        help="Enable per-window performance metrics (Sharpe/Sortino/drawdown/win rate)",
+    )
     return p.parse_args()
 
 
