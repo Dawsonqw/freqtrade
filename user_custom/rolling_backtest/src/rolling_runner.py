@@ -22,8 +22,11 @@ from freqtrade.persistence import LocalTrade, PairLocks
 from freqtrade.util import dt_now
 from freqtrade.util.datetime_helpers import dt_ts
 
+import numpy as np
+
 from .parity_tools import compute_trade_digest
 from .signal_export import SignalExporter
+from .window_metrics import WindowPerformance, compute_all_window_performances
 from .windowing import Window, build_windows
 
 
@@ -405,6 +408,34 @@ class RollingBacktestRunner:
             },
         }
 
+        # ---- Per-window performance metrics ----
+        window_boundaries = [
+            (ws.index, datetime.fromisoformat(ws.start), datetime.fromisoformat(ws.end))
+            for ws in self.window_stats
+            if ws.status == "ok"
+        ]
+        starting_bal = strat.config.get("dry_run_wallet", 1000.0)
+        window_performances = compute_all_window_performances(
+            all_trades=trades_df,
+            window_boundaries=window_boundaries,
+            starting_balance=starting_bal,
+        )
+        strat_result["window_performances"] = [wp.to_dict() for wp in window_performances]
+
+        # Window stability summary
+        if window_performances:
+            sharpes = [wp.sharpe_ratio for wp in window_performances if wp.total_trades > 0]
+            win_rates = [wp.win_rate for wp in window_performances if wp.total_trades > 0]
+            drawdowns = [wp.max_drawdown for wp in window_performances if wp.total_trades > 0]
+            strat_result["summary"]["window_stability"] = {
+                "sharpe_mean": float(np.mean(sharpes)) if sharpes else 0.0,
+                "sharpe_std": float(np.std(sharpes)) if len(sharpes) > 1 else 0.0,
+                "win_rate_mean": float(np.mean(win_rates)) if win_rates else 0.0,
+                "win_rate_std": float(np.std(win_rates)) if len(win_rates) > 1 else 0.0,
+                "max_drawdown_mean": float(np.mean(drawdowns)) if drawdowns else 0.0,
+                "max_drawdown_worst": float(max(drawdowns)) if drawdowns else 0.0,
+            }
+
         # Build BacktestContentType for standard report generation
         bt_content = None
         first_ok = next((ws for ws in self.window_stats if ws.status == "ok"), None)
@@ -435,7 +466,7 @@ class RollingBacktestRunner:
         )
 
         # Print per-window rolling performance table
-        self._print_window_summary_table(strategy_name, strat.config.get("stake_currency", ""))
+        self._print_window_summary_table(strategy_name, strat.config.get("stake_currency", ""), window_performances)
 
         # Export signals and detect deviations if enabled
         if signal_exporter is not None:
@@ -444,29 +475,73 @@ class RollingBacktestRunner:
 
         return strat_result, bt_content
 
-    def _print_window_summary_table(self, strategy_name: str, stake_currency: str) -> None:
-        """Print a compact table showing per-window trade counts and cumulative performance."""
+    def _print_window_summary_table(
+        self,
+        strategy_name: str,
+        stake_currency: str,
+        window_performances: list[WindowPerformance] | None = None,
+    ) -> None:
+        """Print a compact table showing per-window trade counts, performance metrics, and cumulative stats."""
         ok_windows = [ws for ws in self.window_stats if ws.status == "ok"]
         if not ok_windows:
             return
 
+        # Build lookup from window_index -> WindowPerformance
+        perf_map: dict[int, WindowPerformance] = {}
+        if window_performances:
+            perf_map = {wp.window_index: wp for wp in window_performances}
+
+        w = 120  # table width
         header = (
-            f"\n{'=' * 75}\n"
+            f"\n{'=' * w}\n"
             f" Rolling Window Summary — {strategy_name}\n"
-            f"{'=' * 75}\n"
-            f" {'Window':>6} | {'Period':^23} | {'Trades':>6} | {'Open':>4} | {'Status':^7}\n"
-            f"{'-' * 75}"
+            f"{'=' * w}\n"
+            f" {'Win':>4} | {'Period':^23} | {'Trades':>6} | {'Open':>4} | "
+            f"{'Profit%':>8} | {'WinRate':>7} | {'Sharpe':>7} | {'MaxDD%':>7} | {'PF':>6} | {'Status':^7}\n"
+            f"{'-' * w}"
         )
         lines = [header]
         for ws in self.window_stats:
             start_short = ws.start[:10] if ws.start else "?"
             end_short = ws.end[:10] if ws.end else "?"
             period = f"{start_short} → {end_short}"
+
+            wp = perf_map.get(ws.index)
+            if wp and wp.total_trades > 0:
+                profit_str = f"{wp.total_profit_pct:>8.2f}"
+                wr_str = f"{wp.win_rate * 100:>6.1f}%"
+                sharpe_str = f"{wp.sharpe_ratio:>7.2f}"
+                dd_str = f"{wp.max_drawdown * 100:>6.2f}%"
+                pf_str = f"{wp.profit_factor:>6.2f}" if wp.profit_factor < 999 else f"{'inf':>6}"
+            else:
+                profit_str = f"{'—':>8}"
+                wr_str = f"{'—':>7}"
+                sharpe_str = f"{'—':>7}"
+                dd_str = f"{'—':>7}"
+                pf_str = f"{'—':>6}"
+
             lines.append(
-                f" {ws.index:>6} | {period:^23} | {ws.trades_after_window:>6} | "
-                f"{ws.open_trades_after_window:>4} | {ws.status:^7}"
+                f" {ws.index:>4} | {period:^23} | {ws.trades_after_window:>6} | "
+                f"{ws.open_trades_after_window:>4} | {profit_str} | {wr_str} | "
+                f"{sharpe_str} | {dd_str} | {pf_str} | {ws.status:^7}"
             )
-        lines.append(f"{'=' * 75}")
+        lines.append(f"{'=' * w}")
+
+        # Stability footer if we have metrics
+        if perf_map:
+            active = [wp for wp in window_performances if wp.total_trades > 0]
+            if active:
+                avg_sharpe = np.mean([wp.sharpe_ratio for wp in active])
+                avg_wr = np.mean([wp.win_rate for wp in active]) * 100
+                worst_dd = max(wp.max_drawdown for wp in active) * 100
+                total_profit = sum(wp.total_profit_pct for wp in active)
+                lines.append(
+                    f" TOTAL  | {'':^23} | {sum(wp.total_trades for wp in active):>6} | "
+                    f"{'':>4} | {total_profit:>8.2f} | {avg_wr:>6.1f}% | "
+                    f"{avg_sharpe:>7.2f} | {worst_dd:>6.2f}% | {'':>6} |"
+                )
+                lines.append(f"{'=' * w}")
+
         print("\n".join(lines))
 
     def _generate_standard_reports(
