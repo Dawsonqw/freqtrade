@@ -7,7 +7,7 @@ import talib.abstract as ta
 
 
 class RollingSmokeStrategy(IStrategy):
-    timeframe = "15m"
+    timeframe = "5m"
     startup_candle_count = 200
     minimal_roi = {"0": 0.02}
     stoploss = -0.05

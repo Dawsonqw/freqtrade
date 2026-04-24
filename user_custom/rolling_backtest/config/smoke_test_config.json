@@ -12,20 +12,14 @@
   "candle_type_def": "futures",
   "cancel_open_orders_on_exit": false,
   "unfilledtimeout": {
-    "entry": 5,
-    "exit": 5,
-    "exit_timeout_count": 0,
-    "unit": "minutes"
+    "entry": 5, "exit": 5, "exit_timeout_count": 0, "unit": "minutes"
   },
   "entry_pricing": {
     "price_side": "same",
     "use_order_book": true,
     "order_book_top": 1,
     "price_last_balance": 0.0,
-    "check_depth_of_market": {
-      "enabled": false,
-      "bids_to_ask_delta": 1
-    }
+    "check_depth_of_market": { "enabled": false, "bids_to_ask_delta": 1 }
   },
   "exit_pricing": {
     "price_side": "same",
@@ -35,13 +29,11 @@
   "dataformat_ohlcv": "feather",
   "exchange": {
     "name": "binance",
-    "key": "${BINANCE_API_KEY}",
-    "secret": "${BINANCE_API_SECRET}",
+    "key": "",
+    "secret": "",
     "ccxt_config": {
       "enableRateLimit": true,
-      "options": {
-        "defaultType": "future"
-      }
+      "options": { "defaultType": "future" }
     },
     "pair_whitelist": [
       "BTC/USDT:USDT",
@@ -50,14 +42,12 @@
     "pair_blacklist": []
   },
   "pairlists": [
-    {
-      "method": "StaticPairList"
-    }
+    { "method": "StaticPairList" }
   ],
-  "datadir": "/data/freqtrade_data",
+  "datadir": "/tmp/fake_ft_data",
   "strategy": "RollingSmokeStrategy",
   "strategy_path": "/root/workspace/freqtrade/user_custom/rolling_backtest/strategies",
   "user_data_dir": "/root/workspace/freqtrade/user_data",
-  "timerange": "20210101-",
+  "timerange": "20240101-20240401",
   "disableparamexport": true
 }
