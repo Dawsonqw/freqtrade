@@ -388,7 +388,35 @@ class RollingBacktestRunner:
             (ended_at - started_at).total_seconds(),
         )
 
+        # Print per-window rolling performance table
+        self._print_window_summary_table(strategy_name, strat.config.get("stake_currency", ""))
+
         return strat_result, bt_content
+
+    def _print_window_summary_table(self, strategy_name: str, stake_currency: str) -> None:
+        """Print a compact table showing per-window trade counts and cumulative performance."""
+        ok_windows = [ws for ws in self.window_stats if ws.status == "ok"]
+        if not ok_windows:
+            return
+
+        header = (
+            f"\n{'=' * 75}\n"
+            f" Rolling Window Summary — {strategy_name}\n"
+            f"{'=' * 75}\n"
+            f" {'Window':>6} | {'Period':^23} | {'Trades':>6} | {'Open':>4} | {'Status':^7}\n"
+            f"{'-' * 75}"
+        )
+        lines = [header]
+        for ws in self.window_stats:
+            start_short = ws.start[:10] if ws.start else "?"
+            end_short = ws.end[:10] if ws.end else "?"
+            period = f"{start_short} → {end_short}"
+            lines.append(
+                f" {ws.index:>6} | {period:^23} | {ws.trades_after_window:>6} | "
+                f"{ws.open_trades_after_window:>4} | {ws.status:^7}"
+            )
+        lines.append(f"{'=' * 75}")
+        print("\n".join(lines))
 
     def _generate_standard_reports(
         self,

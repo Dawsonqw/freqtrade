@@ -61,6 +61,13 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Detail timeframe for more accurate backtest simulation",
     )
+    p.add_argument(
+        "--backtest-breakdown",
+        nargs="+",
+        default=[],
+        choices=["day", "week", "month"],
+        help="Show profit breakdown per period (day/week/month)",
+    )
     return p.parse_args()
 
 
@@ -106,7 +113,7 @@ def build_args(ns: argparse.Namespace) -> dict[str, Any]:
         "user_data_dir": ns.user_data_dir,
         "export": "none",
         "cache": "none",
-        "backtest_breakdown": [],
+        "backtest_breakdown": ns.backtest_breakdown,
         "enable_protections": ns.enable_protections,
     }
     return args
