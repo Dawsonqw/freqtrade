@@ -201,15 +201,85 @@ class RollingBacktestRunner:
         max_failed_windows: int = 0,
         export: str = "none",
     ) -> dict:
+        """Run rolling backtest for all loaded strategies.
+
+        Returns a dict with ``strategies`` list (one entry per strategy)
+        and a combined ``all_bt_content`` for standard report generation.
+        When only one strategy is loaded, the top-level keys are identical
+        to the single-strategy result for backward compatibility.
+        """
         if not self.bt.strategylist:
             raise RuntimeError("No strategy loaded.")
-        if len(self.bt.strategylist) > 1:
-            logger.warning("Rolling runner currently executes only first strategy in strategylist.")
 
-        strat = self.bt.strategylist[0]
+        all_strategy_results: list[dict] = []
+        all_bt_content: dict = {}
+        global_started_at = dt_now()
+
+        for strat in self.bt.strategylist:
+            strat_result, bt_content = self._run_strategy(
+                strat=strat,
+                fail_fast=fail_fast,
+                max_failed_windows=max_failed_windows,
+            )
+            all_strategy_results.append(strat_result)
+            if bt_content is not None:
+                all_bt_content[strat.get_strategy_name()] = bt_content
+
+        global_ended_at = dt_now()
+
+        # Build combined result — backward compatible for single strategy
+        if len(all_strategy_results) == 1:
+            result = all_strategy_results[0]
+        else:
+            result = {
+                "strategies": all_strategy_results,
+                "summary": {
+                    "total_strategies": len(all_strategy_results),
+                    "start_ts": dt_ts(global_started_at),
+                    "end_ts": dt_ts(global_ended_at),
+                    "duration_sec": round(
+                        (global_ended_at - global_started_at).total_seconds(), 3
+                    ),
+                },
+            }
+
+        if output_json:
+            output_json.parent.mkdir(parents=True, exist_ok=True)
+            output_json.write_text(
+                json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+
+        # ---- Standard freqtrade reports (combined across all strategies) ----
+        if all_bt_content:
+            # Use global timerange from first strategy's windows
+            first_result = all_strategy_results[0]
+            self._generate_standard_reports(
+                all_bt_content=all_bt_content,
+                min_date=datetime.fromisoformat(first_result["timerange"]["start"]),
+                max_date=datetime.fromisoformat(first_result["timerange"]["end"]),
+                started_at=global_started_at,
+                ended_at=global_ended_at,
+                export=export,
+            )
+
+        return result
+
+    def _run_strategy(
+        self,
+        *,
+        strat,
+        fail_fast: bool,
+        max_failed_windows: int,
+    ) -> tuple[dict, dict | None]:
+        """Run rolling backtest for a single strategy.
+
+        Returns (result_dict, bt_content_or_None).
+        """
+        strategy_name = strat.get_strategy_name()
         self.bt._set_strategy(strat)
         self.bt.reset_backtest(self.bt.enable_protections)
         self.bt.wallets.update()
+        self.window_stats = []  # reset per strategy
 
         windows = build_windows(
             self.bt.timerange,
@@ -217,11 +287,11 @@ class RollingBacktestRunner:
             window_days=self.window_days,
         )
         if not windows:
-            raise RuntimeError("No windows generated from timerange.")
+            raise RuntimeError(f"No windows generated for strategy {strategy_name}.")
 
         logger.info(
             "Rolling backtest start: strategy=%s windows=%s timerange=%s",
-            strat.get_strategy_name(),
+            strategy_name,
             len(windows),
             self.bt.timerange.timerange_str,
         )
@@ -248,7 +318,7 @@ class RollingBacktestRunner:
                         error=str(exc),
                     )
                 )
-                logger.exception("[window %s] failed", window.index)
+                logger.exception("[%s][window %s] failed", strategy_name, window.index)
                 if fail_fast:
                     raise
                 if max_failed_windows > 0 and failed_count > max_failed_windows:
@@ -266,8 +336,8 @@ class RollingBacktestRunner:
             "error": sum(1 for x in self.window_stats if x.status == "error"),
         }
 
-        result = {
-            "strategy": strat.get_strategy_name(),
+        strat_result = {
+            "strategy": strategy_name,
             "window_days": self.window_days,
             "timerange": {
                 "start": windows[0].start.isoformat(),
@@ -289,40 +359,41 @@ class RollingBacktestRunner:
             },
         }
 
-        if output_json:
-            output_json.parent.mkdir(parents=True, exist_ok=True)
-            output_json.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
+        # Build BacktestContentType for standard report generation
+        bt_content = None
+        first_ok = next((ws for ws in self.window_stats if ws.status == "ok"), None)
+        if first_ok:
+            bt_content = {
+                "results": trades_df,
+                "config": strat.config,
+                "locks": PairLocks.get_all_locks(),
+                "rejected_signals": self.bt.rejected_trades,
+                "timedout_entry_orders": self.bt.timedout_entry_orders,
+                "timedout_exit_orders": self.bt.timedout_exit_orders,
+                "canceled_trade_entries": self.bt.canceled_trade_entries,
+                "canceled_entry_orders": self.bt.canceled_entry_orders,
+                "replaced_entry_orders": self.bt.replaced_entry_orders,
+                "final_balance": final_balance,
+                "backtest_start_time": int(started_at.timestamp()),
+                "backtest_end_time": int(ended_at.timestamp()),
+                "run_id": "",
+                "wallet_summary": convert_bt_wallet_collection(self.bt.wallet_captures),
+            }
 
-        # ---- Standard freqtrade reports ----
-        # Reload last-window data for market_change calculation and report generation
-        last_ok_window = None
-        first_ok_window = None
-        for ws in self.window_stats:
-            if ws.status == "ok":
-                if first_ok_window is None:
-                    first_ok_window = ws
-                last_ok_window = ws
+        logger.info(
+            "[%s] completed: %d trades, balance=%.4f, duration=%.1fs",
+            strategy_name,
+            len(trades_df),
+            final_balance,
+            (ended_at - started_at).total_seconds(),
+        )
 
-        if first_ok_window and last_ok_window:
-            self._generate_standard_reports(
-                strat=strat,
-                trades_df=trades_df,
-                final_balance=final_balance,
-                min_date=datetime.fromisoformat(first_ok_window.start),
-                max_date=datetime.fromisoformat(last_ok_window.end),
-                started_at=started_at,
-                ended_at=ended_at,
-                export=export,
-            )
-
-        return result
+        return strat_result, bt_content
 
     def _generate_standard_reports(
         self,
         *,
-        strat,
-        trades_df: DataFrame,
-        final_balance: float,
+        all_bt_content: dict,
         min_date: datetime,
         max_date: datetime,
         started_at: datetime,
@@ -330,30 +401,8 @@ class RollingBacktestRunner:
         export: str,
     ) -> None:
         """Generate freqtrade-standard backtest stats, console output, and ZIP export."""
-        strategy_name = strat.get_strategy_name()
 
-        # Build BacktestContentType dict (same structure as Backtesting.backtest() returns)
-        bt_content = {
-            "results": trades_df,
-            "config": strat.config,
-            "locks": PairLocks.get_all_locks(),
-            "rejected_signals": self.bt.rejected_trades,
-            "timedout_entry_orders": self.bt.timedout_entry_orders,
-            "timedout_exit_orders": self.bt.timedout_exit_orders,
-            "canceled_trade_entries": self.bt.canceled_trade_entries,
-            "canceled_entry_orders": self.bt.canceled_entry_orders,
-            "replaced_entry_orders": self.bt.replaced_entry_orders,
-            "final_balance": final_balance,
-            "backtest_start_time": int(started_at.timestamp()),
-            "backtest_end_time": int(ended_at.timestamp()),
-            "run_id": "",
-            "wallet_summary": convert_bt_wallet_collection(self.bt.wallet_captures),
-        }
-
-        all_bt_content = {strategy_name: bt_content}
-
-        # Load last window of data for market_change calculation
-        # Use a minimal load — just enough for the full timerange
+        # Load data for market_change calculation
         full_tr = TimeRange.parse_timerange(
             f"{min_date.strftime('%Y%m%d')}-{max_date.strftime('%Y%m%d')}"
         )
@@ -392,13 +441,19 @@ class RollingBacktestRunner:
                     for s, x in all_bt_content.items()
                     if "wallet_summary" in x
                 }
+                # Build strategy_files mapping from loaded strategies
+                strategy_files = {}
+                for s in self.bt.strategylist:
+                    sname = s.get_strategy_name()
+                    if sname in all_bt_content and getattr(s, "__file__", None):
+                        strategy_files[sname] = s.__file__
                 outpath = store_backtest_results(
                     self.bt.config,
                     stats,
                     dt_appendix,
                     market_change_data=market_change_data,
                     wallet_summary=wallet_summary,
-                    strategy_files={strategy_name: strat.__file__} if strat.__file__ else None,
+                    strategy_files=strategy_files or None,
                 )
                 logger.info("Standard backtest results stored to: %s", outpath)
         except Exception as exc:  # noqa: BLE001

@@ -30,6 +30,7 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Run chunked rolling backtest")
     p.add_argument("--config", required=True, help="Freqtrade config path")
     p.add_argument("--strategy", default=None, help="Override strategy name")
+    p.add_argument("--strategy-list", nargs="+", default=None, help="List of strategies to compare")
     p.add_argument("--timerange", default=None, help="Override timerange")
     p.add_argument("--window-days", type=int, default=14, help="Chunk size in days")
     p.add_argument("--datadir", default="/data/freqtrade_data", help="OHLCV data directory")
@@ -96,6 +97,7 @@ def build_args(ns: argparse.Namespace) -> dict[str, Any]:
     args: dict[str, Any] = {
         "config": [ns.config],
         "strategy": ns.strategy,
+        "strategy_list": ns.strategy_list or [],
         "timerange": ns.timerange,
         "verbosity": 0,
         "timeframe": None,
