@@ -44,6 +44,22 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="Abort when failed window count exceeds this threshold (0 = unlimited)",
     )
+    p.add_argument(
+        "--export",
+        default="none",
+        choices=["none", "trades", "signals"],
+        help="Export standard freqtrade backtest ZIP (none/trades/signals)",
+    )
+    p.add_argument(
+        "--enable-protections",
+        action="store_true",
+        help="Enable protections during backtest",
+    )
+    p.add_argument(
+        "--timeframe-detail",
+        default=None,
+        help="Detail timeframe for more accurate backtest simulation",
+    )
     return p.parse_args()
 
 
@@ -83,13 +99,13 @@ def build_args(ns: argparse.Namespace) -> dict[str, Any]:
         "timerange": ns.timerange,
         "verbosity": 0,
         "timeframe": None,
-        "timeframe_detail": None,
+        "timeframe_detail": ns.timeframe_detail,
         "datadir": ns.datadir,
         "user_data_dir": ns.user_data_dir,
         "export": "none",
         "cache": "none",
         "backtest_breakdown": [],
-        "enable_protections": False,
+        "enable_protections": ns.enable_protections,
     }
     return args
 
@@ -116,6 +132,7 @@ def main() -> None:
         output_json=Path(ns.output_json),
         fail_fast=ns.fail_fast,
         max_failed_windows=ns.max_failed_windows,
+        export=ns.export,
     )
 
     print(json.dumps(result["summary"], ensure_ascii=False, indent=2))

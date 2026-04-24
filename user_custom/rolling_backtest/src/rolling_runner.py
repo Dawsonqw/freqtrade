@@ -4,6 +4,7 @@ import gc
 import json
 import logging
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from pathlib import Path
 
 from pandas import DataFrame
@@ -13,8 +14,11 @@ from freqtrade.constants import DATETIME_PRINT_FORMAT
 from freqtrade.data import history
 from freqtrade.data.btanalysis import get_tick_size_over_time, trade_list_to_dataframe
 from freqtrade.data.converter import trim_dataframes
-from freqtrade.optimize.backtesting import Backtesting
-from freqtrade.persistence import LocalTrade
+from freqtrade.data.metrics import combined_dataframes_with_rel_mean
+from freqtrade.optimize.backtesting import Backtesting, convert_bt_wallet_collection
+from freqtrade.optimize.optimize_reports import generate_backtest_stats, store_backtest_results
+from freqtrade.optimize.optimize_reports.bt_output import show_backtest_results
+from freqtrade.persistence import LocalTrade, PairLocks
 from freqtrade.util import dt_now
 from freqtrade.util.datetime_helpers import dt_ts
 
@@ -195,6 +199,7 @@ class RollingBacktestRunner:
         *,
         fail_fast: bool = False,
         max_failed_windows: int = 0,
+        export: str = "none",
     ) -> dict:
         if not self.bt.strategylist:
             raise RuntimeError("No strategy loaded.")
@@ -288,4 +293,117 @@ class RollingBacktestRunner:
             output_json.parent.mkdir(parents=True, exist_ok=True)
             output_json.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
 
+        # ---- Standard freqtrade reports ----
+        # Reload last-window data for market_change calculation and report generation
+        last_ok_window = None
+        first_ok_window = None
+        for ws in self.window_stats:
+            if ws.status == "ok":
+                if first_ok_window is None:
+                    first_ok_window = ws
+                last_ok_window = ws
+
+        if first_ok_window and last_ok_window:
+            self._generate_standard_reports(
+                strat=strat,
+                trades_df=trades_df,
+                final_balance=final_balance,
+                min_date=datetime.fromisoformat(first_ok_window.start),
+                max_date=datetime.fromisoformat(last_ok_window.end),
+                started_at=started_at,
+                ended_at=ended_at,
+                export=export,
+            )
+
         return result
+
+    def _generate_standard_reports(
+        self,
+        *,
+        strat,
+        trades_df: DataFrame,
+        final_balance: float,
+        min_date: datetime,
+        max_date: datetime,
+        started_at: datetime,
+        ended_at: datetime,
+        export: str,
+    ) -> None:
+        """Generate freqtrade-standard backtest stats, console output, and ZIP export."""
+        strategy_name = strat.get_strategy_name()
+
+        # Build BacktestContentType dict (same structure as Backtesting.backtest() returns)
+        bt_content = {
+            "results": trades_df,
+            "config": strat.config,
+            "locks": PairLocks.get_all_locks(),
+            "rejected_signals": self.bt.rejected_trades,
+            "timedout_entry_orders": self.bt.timedout_entry_orders,
+            "timedout_exit_orders": self.bt.timedout_exit_orders,
+            "canceled_trade_entries": self.bt.canceled_trade_entries,
+            "canceled_entry_orders": self.bt.canceled_entry_orders,
+            "replaced_entry_orders": self.bt.replaced_entry_orders,
+            "final_balance": final_balance,
+            "backtest_start_time": int(started_at.timestamp()),
+            "backtest_end_time": int(ended_at.timestamp()),
+            "run_id": "",
+            "wallet_summary": convert_bt_wallet_collection(self.bt.wallet_captures),
+        }
+
+        all_bt_content = {strategy_name: bt_content}
+
+        # Load last window of data for market_change calculation
+        # Use a minimal load — just enough for the full timerange
+        full_tr = TimeRange.parse_timerange(
+            f"{min_date.strftime('%Y%m%d')}-{max_date.strftime('%Y%m%d')}"
+        )
+        btdata = history.load_data(
+            datadir=self.bt.config["datadir"],
+            pairs=self.bt.pairlists.whitelist,
+            timeframe=self.bt.timeframe,
+            timerange=full_tr,
+            startup_candles=0,
+            fail_without_data=False,
+            data_format=self.bt.config["dataformat_ohlcv"],
+            candle_type=self.bt.config.get("candle_type_def"),
+        )
+
+        if not btdata:
+            logger.warning("Cannot generate standard reports: no data available for market change.")
+            return
+
+        try:
+            stats = generate_backtest_stats(
+                btdata=btdata,
+                all_results=all_bt_content,
+                min_date=min_date,
+                max_date=max_date,
+            )
+
+            # Console output — formatted tables
+            show_backtest_results(self.bt.config, stats)
+
+            # Export to standard ZIP if requested
+            if export in ("trades", "signals"):
+                dt_appendix = started_at.strftime("%Y-%m-%d_%H-%M-%S")
+                market_change_data = combined_dataframes_with_rel_mean(btdata, min_date, max_date)
+                wallet_summary = {
+                    s: x["wallet_summary"]
+                    for s, x in all_bt_content.items()
+                    if "wallet_summary" in x
+                }
+                outpath = store_backtest_results(
+                    self.bt.config,
+                    stats,
+                    dt_appendix,
+                    market_change_data=market_change_data,
+                    wallet_summary=wallet_summary,
+                    strategy_files={strategy_name: strat.__file__} if strat.__file__ else None,
+                )
+                logger.info("Standard backtest results stored to: %s", outpath)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Failed to generate standard reports: %s", exc)
+        finally:
+            # Clean up loaded data
+            del btdata
+            gc.collect()
