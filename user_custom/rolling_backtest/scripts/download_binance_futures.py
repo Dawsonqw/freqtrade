@@ -70,6 +70,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--retry-sleep", type=float, default=2.0, help="Base sleep seconds for retry backoff")
     p.add_argument("--sleep-between-batches", type=float, default=0.0, help="Throttle between batches")
     p.add_argument(
+        "--no-parallel-download",
+        action="store_true",
+        default=True,
+        help="Disable freqtrade parallel quick-download path to reduce DNS burst failures.",
+    )
+    p.add_argument(
         "--continue-on-error",
         action="store_true",
         default=True,
@@ -116,6 +122,7 @@ def build_download_config(
     candle_types: list[CandleType],
     prepend: bool,
     erase: bool,
+    no_parallel_download: bool,
 ) -> dict[str, Any]:
     key = os.getenv("BINANCE_API_KEY", "")
     secret = os.getenv("BINANCE_API_SECRET", "")
@@ -137,6 +144,7 @@ def build_download_config(
         "prepend_data": prepend,
         "erase": erase,
         "candle_types": candle_types,
+        "no_parallel_download": no_parallel_download,
         "exchange": {
             "name": "binance",
             "key": key,
@@ -260,6 +268,7 @@ def main() -> None:
                     candle_types=candle_types,
                     prepend=args.prepend,
                     erase=args.erase,
+                    no_parallel_download=args.no_parallel_download,
                 )
 
                 logger.info(
@@ -304,6 +313,7 @@ def main() -> None:
         "candle_types": [c.value for c in candle_types],
         "prepend": bool(args.prepend),
         "erase": bool(args.erase),
+        "no_parallel_download": bool(args.no_parallel_download),
         "failures": [f.__dict__ for f in failures],
         "failure_count": len(failures),
     }
