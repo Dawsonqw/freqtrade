@@ -76,6 +76,12 @@ def parse_args() -> argparse.Namespace:
         help="Disable freqtrade parallel quick-download path to reduce DNS burst failures.",
     )
     p.add_argument(
+        "--only-from-ccxt",
+        action="store_true",
+        default=True,
+        help="Disable data.binance.vision fast path and use CCXT REST only (more stable on low fd limits).",
+    )
+    p.add_argument(
         "--continue-on-error",
         action="store_true",
         default=True,
@@ -123,6 +129,7 @@ def build_download_config(
     prepend: bool,
     erase: bool,
     no_parallel_download: bool,
+    only_from_ccxt: bool,
 ) -> dict[str, Any]:
     key = os.getenv("BINANCE_API_KEY", "")
     secret = os.getenv("BINANCE_API_SECRET", "")
@@ -147,6 +154,7 @@ def build_download_config(
         "no_parallel_download": no_parallel_download,
         "exchange": {
             "name": "binance",
+            "only_from_ccxt": only_from_ccxt,
             "key": key,
             "secret": secret,
             "pair_whitelist": pairs,
@@ -269,6 +277,7 @@ def main() -> None:
                     prepend=args.prepend,
                     erase=args.erase,
                     no_parallel_download=args.no_parallel_download,
+                    only_from_ccxt=args.only_from_ccxt,
                 )
 
                 logger.info(
@@ -314,6 +323,7 @@ def main() -> None:
         "prepend": bool(args.prepend),
         "erase": bool(args.erase),
         "no_parallel_download": bool(args.no_parallel_download),
+        "only_from_ccxt": bool(args.only_from_ccxt),
         "failures": [f.__dict__ for f in failures],
         "failure_count": len(failures),
     }
