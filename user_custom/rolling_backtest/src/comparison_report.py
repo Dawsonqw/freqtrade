@@ -21,6 +21,7 @@ class WindowComparison:
     best_strategy_profit: str = ""
     best_strategy_sharpe: str = ""
     best_strategy_win_rate: str = ""
+    best_strategy_drawdown: str = ""  # lowest drawdown is best
     profit_spread: float = 0.0  # best - worst profit
     sharpe_spread: float = 0.0
 
@@ -91,6 +92,8 @@ def build_comparison_report(
         best_profit_name = max(strategy_metrics, key=lambda s: strategy_metrics[s].get("total_profit_pct", -999))
         best_sharpe_name = max(strategy_metrics, key=lambda s: strategy_metrics[s].get("sharpe_ratio", -999))
         best_winrate_name = max(strategy_metrics, key=lambda s: strategy_metrics[s].get("win_rate", -999))
+        # Lowest drawdown is best
+        best_drawdown_name = min(strategy_metrics, key=lambda s: strategy_metrics[s].get("max_drawdown", 999))
 
         wins_profit[best_profit_name] = wins_profit.get(best_profit_name, 0) + 1
         wins_sharpe[best_sharpe_name] = wins_sharpe.get(best_sharpe_name, 0) + 1
@@ -108,6 +111,7 @@ def build_comparison_report(
             best_strategy_profit=best_profit_name,
             best_strategy_sharpe=best_sharpe_name,
             best_strategy_win_rate=best_winrate_name,
+            best_strategy_drawdown=best_drawdown_name,
             profit_spread=max(profits) - min(profits) if profits else 0.0,
             sharpe_spread=max(sharpes) - min(sharpes) if sharpes else 0.0,
         )
@@ -142,6 +146,52 @@ def build_comparison_report(
     )
 
 
+def _format_metric_section(
+    report: StrategyWindowComparison,
+    strategies: list[str],
+    metric_key: str,
+    metric_label: str,
+    best_attr: str,
+    col_width: int,
+    val_width: int,
+    *,
+    fmt: str = "+.2f",
+    pct: bool = False,
+    show_delta: bool = True,
+) -> list[str]:
+    """Format one metric section (per-window rows + optional delta column)."""
+    lines = []
+    lines.append(f"\n --- {metric_label} ---")
+
+    for wc in report.windows:
+        start_short = wc.window_start[:10]
+        end_short = wc.window_end[:10]
+        period = f"{start_short}→{end_short}"
+        row = f" {f'Win {wc.window_index}':>6} | {period:^23} |"
+        vals: list[float] = []
+        best_name = getattr(wc, best_attr, "")
+
+        for s in strategies:
+            raw = wc.strategy_metrics.get(s, {}).get(metric_key, 0)
+            val = raw * 100 if pct else raw
+            vals.append(val)
+            marker = " ★" if s == best_name else "  "
+            formatted = f"{val:{fmt}}"
+            row += f" {formatted:>{val_width}}{marker} |"
+
+        # Delta column (spread between best and worst)
+        if show_delta and len(vals) >= 2:
+            delta = max(vals) - min(vals)
+            row += f"  Δ{delta:>+.2f}"
+        elif show_delta:
+            row += f"  {'':>8}"
+
+        row += f"  {best_name}"
+        lines.append(row)
+
+    return lines
+
+
 def format_comparison_table(report: StrategyWindowComparison) -> str:
     """Format comparison report as human-readable text table."""
     if not report.windows:
@@ -150,55 +200,49 @@ def format_comparison_table(report: StrategyWindowComparison) -> str:
     strategies = report.strategies
     col_width = max(len(s) for s in strategies) + 4
     val_width = max(col_width - 4, 6)
+    total_w = 50 + col_width * len(strategies) + 12
 
     lines = []
-    lines.append(f"\n{'=' * (40 + col_width * len(strategies))}")
+    lines.append(f"\n{'=' * total_w}")
     lines.append(" Multi-Strategy Window Comparison")
-    lines.append(f"{'=' * (40 + col_width * len(strategies))}")
+    lines.append(f"{'=' * total_w}")
 
     # Header row
     hdr = f" {'Window':>6} | {'Period':^23} |"
     for s in strategies:
         hdr += f" {s:^{col_width}} |"
-    hdr += " Best"
+    hdr += "  Delta     Best"
     lines.append(hdr)
-    lines.append(f"{'-' * (40 + col_width * len(strategies) + 6)}")
+    lines.append(f"{'-' * total_w}")
 
-    # Profit comparison per window
-    lines.append(" --- Profit % ---")
-    for wc in report.windows:
-        start_short = wc.window_start[:10]
-        end_short = wc.window_end[:10]
-        period = f"{start_short}→{end_short}"
-        row = f" {f'Win {wc.window_index}':>6} | {period:^23} |"
-        for s in strategies:
-            val = wc.strategy_metrics.get(s, {}).get("total_profit_pct", 0)
-            marker = " ★" if s == wc.best_strategy_profit else "  "
-            row += f" {val:>+{val_width}.2f}{marker} |"
-        row += f" {wc.best_strategy_profit}"
-        lines.append(row)
+    # Profit %
+    lines.extend(_format_metric_section(
+        report, strategies, "total_profit_pct", "Profit %",
+        "best_strategy_profit", col_width, val_width, fmt="+.2f"))
 
-    # Sharpe comparison per window
-    lines.append(f"\n --- Sharpe Ratio ---")
-    for wc in report.windows:
-        start_short = wc.window_start[:10]
-        end_short = wc.window_end[:10]
-        period = f"{start_short}→{end_short}"
-        row = f" {f'Win {wc.window_index}':>6} | {period:^23} |"
-        for s in strategies:
-            val = wc.strategy_metrics.get(s, {}).get("sharpe_ratio", 0)
-            marker = " ★" if s == wc.best_strategy_sharpe else "  "
-            row += f" {val:>+{val_width}.2f}{marker} |"
-        row += f" {wc.best_strategy_sharpe}"
-        lines.append(row)
+    # Win Rate %
+    lines.extend(_format_metric_section(
+        report, strategies, "win_rate", "Win Rate %",
+        "best_strategy_win_rate", col_width, val_width, fmt=".1f", pct=True))
+
+    # Sharpe Ratio
+    lines.extend(_format_metric_section(
+        report, strategies, "sharpe_ratio", "Sharpe Ratio",
+        "best_strategy_sharpe", col_width, val_width, fmt="+.2f"))
+
+    # Max Drawdown %
+    lines.extend(_format_metric_section(
+        report, strategies, "max_drawdown", "Max Drawdown %",
+        "best_strategy_drawdown", col_width, val_width, fmt=".2f", pct=True))
 
     # Overall ranking
-    lines.append(f"\n{'=' * (40 + col_width * len(strategies) + 6)}")
+    lines.append(f"\n{'=' * total_w}")
     lines.append(" Overall Ranking")
-    lines.append(f"{'-' * 80}")
+    rank_w = 100
+    lines.append(f"{'-' * rank_w}")
     lines.append(f" {'#':>2} | {'Strategy':<{col_width}} | {'TotalP%':>8} | {'AvgSharpe':>9} | "
                  f"{'AvgWin%':>7} | {'AvgDD%':>7} | {'WinsP':>5} | {'WinsS':>5} | {'Consist':>7}")
-    lines.append(f"{'-' * 80}")
+    lines.append(f"{'-' * rank_w}")
     for i, r in enumerate(report.overall_ranking):
         lines.append(
             f" {i+1:>2} | {r.strategy:<{col_width}} | {r.total_profit_pct:>+8.2f} | "
@@ -206,6 +250,6 @@ def format_comparison_table(report: StrategyWindowComparison) -> str:
             f"{r.avg_max_drawdown * 100:>7.2f} | {r.windows_won_profit:>5} | "
             f"{r.windows_won_sharpe:>5} | {r.consistency_score:>7.2f}"
         )
-    lines.append(f"{'=' * 80}")
+    lines.append(f"{'=' * rank_w}")
 
     return "\n".join(lines)

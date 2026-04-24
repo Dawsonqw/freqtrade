@@ -545,13 +545,13 @@ class RollingBacktestRunner:
         if window_performances:
             perf_map = {wp.window_index: wp for wp in window_performances}
 
-        w = 120  # table width
+        w = 130  # table width
         header = (
             f"\n{'=' * w}\n"
-            f" Rolling Window Summary — {strategy_name}\n"
+            f" Rolling Window Summary — {strategy_name} ({stake_currency})\n"
             f"{'=' * w}\n"
-            f" {'Win':>4} | {'Period':^23} | {'Trades':>6} | {'Open':>4} | "
-            f"{'Profit%':>8} | {'WinRate':>7} | {'Sharpe':>7} | {'MaxDD%':>7} | {'PF':>6} | {'Status':^7}\n"
+            f" {'Win':>4} | {'Period':^23} | {'Trades':>6} | {'Carry':>5} | {'Open':>4} | "
+            f"{'Profit%':>8} | {'WinRate':>7} | {'Sharpe':>7} | {'Sortino':>7} | {'MaxDD%':>7} | {'PF':>6} | {'Status':^7}\n"
             f"{'-' * w}"
         )
         lines = [header]
@@ -561,23 +561,39 @@ class RollingBacktestRunner:
             period = f"{start_short} → {end_short}"
 
             wp = perf_map.get(ws.index)
+            # Use per-window trade count from WindowPerformance (not cumulative)
             if wp and wp.total_trades > 0:
+                trades_str = f"{wp.total_trades:>6}"
+                carry_str = f"{wp.carry_over_trades:>5}"
                 profit_str = f"{wp.total_profit_pct:>8.2f}"
                 wr_str = f"{wp.win_rate * 100:>6.1f}%"
                 sharpe_str = f"{wp.sharpe_ratio:>7.2f}"
+                sortino_str = f"{wp.sortino_ratio:>7.2f}" if wp.sortino_ratio < 999 else f"{'inf':>7}"
                 dd_str = f"{wp.max_drawdown * 100:>6.2f}%"
                 pf_str = f"{wp.profit_factor:>6.2f}" if wp.profit_factor < 999 else f"{'inf':>6}"
-            else:
+            elif wp:
+                trades_str = f"{0:>6}"
+                carry_str = f"{wp.carry_over_trades:>5}"
                 profit_str = f"{'—':>8}"
                 wr_str = f"{'—':>7}"
                 sharpe_str = f"{'—':>7}"
+                sortino_str = f"{'—':>7}"
+                dd_str = f"{'—':>7}"
+                pf_str = f"{'—':>6}"
+            else:
+                trades_str = f"{'?':>6}"
+                carry_str = f"{getattr(ws, 'carry_over_trades', 0):>5}"
+                profit_str = f"{'—':>8}"
+                wr_str = f"{'—':>7}"
+                sharpe_str = f"{'—':>7}"
+                sortino_str = f"{'—':>7}"
                 dd_str = f"{'—':>7}"
                 pf_str = f"{'—':>6}"
 
             lines.append(
-                f" {ws.index:>4} | {period:^23} | {ws.trades_after_window:>6} | "
+                f" {ws.index:>4} | {period:^23} | {trades_str} | {carry_str} | "
                 f"{ws.open_trades_after_window:>4} | {profit_str} | {wr_str} | "
-                f"{sharpe_str} | {dd_str} | {pf_str} | {ws.status:^7}"
+                f"{sharpe_str} | {sortino_str} | {dd_str} | {pf_str} | {ws.status:^7}"
             )
         lines.append(f"{'=' * w}")
 
@@ -586,13 +602,16 @@ class RollingBacktestRunner:
             active = [wp for wp in window_performances if wp.total_trades > 0]
             if active:
                 avg_sharpe = np.mean([wp.sharpe_ratio for wp in active])
+                avg_sortino = np.mean([wp.sortino_ratio for wp in active if wp.sortino_ratio < 999])
                 avg_wr = np.mean([wp.win_rate for wp in active]) * 100
                 worst_dd = max(wp.max_drawdown for wp in active) * 100
                 total_profit = sum(wp.total_profit_pct for wp in active)
+                total_trades = sum(wp.total_trades for wp in active)
+                total_carry = sum(wp.carry_over_trades for wp in active)
                 lines.append(
-                    f" TOTAL  | {'':^23} | {sum(wp.total_trades for wp in active):>6} | "
+                    f" {'TOTAL':>4} | {'':^23} | {total_trades:>6} | {total_carry:>5} | "
                     f"{'':>4} | {total_profit:>8.2f} | {avg_wr:>6.1f}% | "
-                    f"{avg_sharpe:>7.2f} | {worst_dd:>6.2f}% | {'':>6} |"
+                    f"{avg_sharpe:>7.2f} | {avg_sortino:>7.2f} | {worst_dd:>6.2f}% | {'':>6} |"
                 )
                 lines.append(f"{'=' * w}")
 
