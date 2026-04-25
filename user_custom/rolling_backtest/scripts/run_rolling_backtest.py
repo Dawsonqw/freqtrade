@@ -44,7 +44,7 @@ def parse_args() -> argparse.Namespace:
                     help="Minimum window size in days for auto mode (default: 7)")
     p.add_argument("--max-window-days", type=int, default=90,
                     help="Maximum window size in days for auto mode (default: 90)")
-    p.add_argument("--datadir", default="/data/freqtrade_data", help="OHLCV data directory")
+    p.add_argument("--datadir", default=None, help="OHLCV data directory (default: let freqtrade resolve from config)")
     p.add_argument("--user-data-dir", default="/root/workspace/freqtrade/user_data", help="freqtrade user_data directory")
     p.add_argument("--pairs-file", default=None, help="CSV/TXT with pair list")
     p.add_argument("--output-json", default="user_custom/rolling_backtest/output/rolling_backtest_result.json")
@@ -214,7 +214,7 @@ def main() -> None:
     config = setup_optimize_configuration(args, RunMode.BACKTEST)
     # Re-add file logger after freqtrade's logging setup (which reconfigures root logger)
     setup_file_logger(ns.log_file)
-    logger.info("Configuration loaded: timerange=%s, datadir=%s", ns.timerange, ns.datadir)
+    logger.info("Configuration loaded: timerange=%s, datadir=%s", ns.timerange, config.get("datadir"))
 
     if ns.pairs_file:
         pairs = load_pairs(ns.pairs_file)
