@@ -3,7 +3,7 @@ High-frequency parity benchmark strategy for framework comparison.
 
 Designed for comparing builtin freqtrade backtest vs rolling backtest framework.
 Key properties:
-  - High trade frequency (EMA crossover with short periods)
+  - High trade frequency (EMA crossover with momentum confirmation)
   - Resource-safe: fixed stake_amount, stoploss prevents blowup
   - Deterministic: no randomness, no external data, no lookahead
   - Both long and short trades
@@ -16,8 +16,8 @@ import talib.abstract as ta
 
 class FrameworkBenchStrategy(IStrategy):
     """
-    Fast EMA cross + RSI + Bollinger Band strategy.
-    Generates many trades across diverse market conditions.
+    Fast EMA cross + RSI + MACD strategy with strong momentum filter.
+    Generates many trades but with better signal quality.
     """
 
     INTERFACE_VERSION = 3
@@ -25,20 +25,19 @@ class FrameworkBenchStrategy(IStrategy):
 
     # Tiered ROI - takes profit at multiple levels
     minimal_roi = {
-        "0": 0.025,    # 2.5% immediate
-        "20": 0.015,   # 1.5% after 20 candles (100min)
-        "60": 0.008,   # 0.8% after 60 candles (5h)
-        "120": 0.003,  # 0.3% after 10h
-        "240": 0.0,    # breakeven after 20h
+        "0": 0.015,    # 1.5% immediate
+        "15": 0.01,    # 1.0% after 75min
+        "30": 0.005,   # 0.5% after 2.5h
+        "60": 0.002,   # 0.2% after 5h
     }
 
-    # Conservative stoploss — won't blow up the account
-    stoploss = -0.03  # 3% max loss per trade
+    # Tight stoploss — limits per-trade damage
+    stoploss = -0.015  # 1.5% max loss per trade
 
-    # Trailing stop for trend-following
+    # Trailing stop for capturing trends
     trailing_stop = True
-    trailing_stop_positive = 0.01
-    trailing_stop_positive_offset = 0.015
+    trailing_stop_positive = 0.005
+    trailing_stop_positive_offset = 0.01
     trailing_only_offset_is_reached = True
 
     timeframe = "5m"
@@ -46,17 +45,20 @@ class FrameworkBenchStrategy(IStrategy):
 
     process_only_new_candles = True
 
-    # Position sizing: use fixed amount, not unlimited
-    # This ensures we always have capital for new trades
-    # (config should set stake_amount to a fraction of wallet)
-
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         # Fast/slow EMA for trend
         dataframe["ema8"] = ta.EMA(dataframe, timeperiod=8)
         dataframe["ema21"] = ta.EMA(dataframe, timeperiod=21)
+        dataframe["ema50"] = ta.EMA(dataframe, timeperiod=50)
 
         # RSI for momentum filter
         dataframe["rsi"] = ta.RSI(dataframe, timeperiod=14)
+
+        # MACD for trend confirmation
+        macd = ta.MACD(dataframe, fastperiod=12, slowperiod=26, signalperiod=9)
+        dataframe["macd"] = macd["macd"]
+        dataframe["macd_signal"] = macd["macdsignal"]
+        dataframe["macd_hist"] = macd["macdhist"]
 
         # Bollinger Bands for volatility
         bb = ta.BBANDS(dataframe, timeperiod=20, nbdevup=2.0, nbdevdn=2.0)
@@ -67,31 +69,38 @@ class FrameworkBenchStrategy(IStrategy):
         # Volume filter
         dataframe["volume_ma"] = ta.SMA(dataframe["volume"], timeperiod=20)
 
+        # ATR for volatility
+        dataframe["atr"] = ta.ATR(dataframe, timeperiod=14)
+
         return dataframe
 
     def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        # Long: EMA cross up + RSI not overbought + above lower BB
+        # Long: EMA cross up + MACD bullish + RSI in range + trend aligned
         dataframe.loc[
             (
                 (dataframe["ema8"] > dataframe["ema21"])
                 & (dataframe["ema8"].shift(1) <= dataframe["ema21"].shift(1))
-                & (dataframe["rsi"] < 70)
-                & (dataframe["rsi"] > 30)
+                & (dataframe["macd"] > dataframe["macd_signal"])  # MACD bullish
+                & (dataframe["close"] > dataframe["ema50"])  # Above longer trend
+                & (dataframe["rsi"] > 40)
+                & (dataframe["rsi"] < 65)
                 & (dataframe["close"] > dataframe["bb_lower"])
-                & (dataframe["volume"] > dataframe["volume_ma"] * 0.5)
+                & (dataframe["volume"] > dataframe["volume_ma"] * 0.8)
             ),
             ["enter_long", "enter_tag"],
         ] = (1, "ema_cross_up")
 
-        # Short: EMA cross down + RSI not oversold + below upper BB
+        # Short: EMA cross down + MACD bearish + RSI in range + trend aligned
         dataframe.loc[
             (
                 (dataframe["ema8"] < dataframe["ema21"])
                 & (dataframe["ema8"].shift(1) >= dataframe["ema21"].shift(1))
-                & (dataframe["rsi"] > 30)
-                & (dataframe["rsi"] < 70)
+                & (dataframe["macd"] < dataframe["macd_signal"])  # MACD bearish
+                & (dataframe["close"] < dataframe["ema50"])  # Below longer trend
+                & (dataframe["rsi"] > 35)
+                & (dataframe["rsi"] < 60)
                 & (dataframe["close"] < dataframe["bb_upper"])
-                & (dataframe["volume"] > dataframe["volume_ma"] * 0.5)
+                & (dataframe["volume"] > dataframe["volume_ma"] * 0.8)
             ),
             ["enter_short", "enter_tag"],
         ] = (1, "ema_cross_down")
@@ -99,23 +108,23 @@ class FrameworkBenchStrategy(IStrategy):
         return dataframe
 
     def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        # Long exit: EMA cross down or RSI extremely overbought
+        # Long exit: EMA cross down OR RSI extreme overbought
         dataframe.loc[
             (
                 (dataframe["ema8"] < dataframe["ema21"])
                 & (dataframe["ema8"].shift(1) >= dataframe["ema21"].shift(1))
             )
-            | (dataframe["rsi"] > 80),
+            | (dataframe["rsi"] > 78),
             ["exit_long", "exit_tag"],
         ] = (1, "ema_cross_exit")
 
-        # Short exit: EMA cross up or RSI extremely oversold
+        # Short exit: EMA cross up OR RSI extreme oversold
         dataframe.loc[
             (
                 (dataframe["ema8"] > dataframe["ema21"])
                 & (dataframe["ema8"].shift(1) <= dataframe["ema21"].shift(1))
             )
-            | (dataframe["rsi"] < 20),
+            | (dataframe["rsi"] < 22),
             ["exit_short", "exit_tag"],
         ] = (1, "ema_cross_exit")
 

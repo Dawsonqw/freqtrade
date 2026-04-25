@@ -1,7 +1,7 @@
 {
-  "max_open_trades": 5,
+  "max_open_trades": 3,
   "stake_currency": "USDT",
-  "stake_amount": 200,
+  "stake_amount": 100,
   "tradable_balance_ratio": 0.99,
   "dry_run": true,
   "dry_run_wallet": 10000,
@@ -82,10 +82,10 @@
       "method": "StaticPairList"
     }
   ],
-  "datadir": "/data/freqtrade_data",
+  "datadir": "/root/workspace/freqtrade/user_data/data/binance",
   "strategy": "FrameworkBenchStrategy",
   "strategy_path": "/root/workspace/freqtrade/user_custom/rolling_backtest/strategies",
   "user_data_dir": "/root/workspace/freqtrade/user_data",
-  "timerange": "20250425-20260425",
+  "timerange": "20240501-20260401",
   "disableparamexport": true
 }
