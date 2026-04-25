@@ -78,6 +78,7 @@ class RollingBacktestRunner:
         self.window_stats: list[WindowRunStat] = []
         self._dynamic_pairlist = self.bt.config.get("enable_dynamic_pairlist", False)
         self._pair_filter = PairAvailabilityFilter()
+        self._original_whitelist = list(self.bt.pairlists.whitelist)
 
     def _refresh_pairlist_for_window(self, window: Window) -> list[str]:
         """Refresh pairlist at the start of each window (dynamic pairlist mode).
@@ -100,7 +101,8 @@ class RollingBacktestRunner:
         return whitelist
 
     def _load_window_data(self, tr: TimeRange, window: Window | None = None) -> dict[str, DataFrame]:
-        pairs = self.bt.pairlists.whitelist
+        # Restore full whitelist before filtering for this window
+        pairs = list(self._original_whitelist)
         # Filter pairs by availability for this window's time range
         if window is not None and self._pair_filter.loaded:
             original_count = len(pairs)
@@ -132,6 +134,10 @@ class RollingBacktestRunner:
         for pair in data:
             self.bt.price_pair_prec[pair] = get_tick_size_over_time(data[pair])
             self.bt.available_pairs.append(pair)
+        # Update pairlists whitelist to only include pairs with loaded data,
+        # so dp.current_whitelist() in strategies won't query missing pairs
+        if data and self._pair_filter.loaded:
+            self.bt.pairlists._whitelist = list(data.keys())
         return data
 
     def _get_extended_timerange_for_open_trades(self, window: Window) -> TimeRange:
@@ -172,6 +178,7 @@ class RollingBacktestRunner:
         is_last_window: bool,
         signal_exporter: SignalExporter | None = None,
     ) -> None:
+        import time as _time
         t0 = dt_now()
         self.bt.timerange = window.timerange
 
@@ -183,6 +190,7 @@ class RollingBacktestRunner:
 
         # Extend data load range to cover open trades' entry points
         effective_tr = self._get_extended_timerange_for_open_trades(window)
+        _t_load = _time.monotonic()
         raw_data = self._load_window_data(effective_tr, window=window)
         if not raw_data:
             t1 = dt_now()
@@ -209,9 +217,20 @@ class RollingBacktestRunner:
             return
 
         self.bt._load_bt_data_detail()
+        _t_load_done = _time.monotonic()
+        logger.info(
+            "[window %s] data loaded: %d pairs, %.1fs",
+            window.index, len(raw_data), _t_load_done - _t_load,
+        )
 
         # 1) indicators
+        _t_ind = _time.monotonic()
         preprocessed = self.bt.strategy.advise_all_indicators(raw_data)
+        _t_ind_done = _time.monotonic()
+        logger.info(
+            "[window %s] indicators computed: %.1fs",
+            window.index, _t_ind_done - _t_ind,
+        )
 
         # Collect signals if exporter is active
         if signal_exporter is not None:
@@ -241,6 +260,7 @@ class RollingBacktestRunner:
         min_date, max_date = history.get_timerange(preprocessed_tmp)
         processed_lists = self.bt._get_ohlcv_as_lists(preprocessed)
 
+        _t_bt = _time.monotonic()
         for current_time, pair, row, is_last_row, trade_dir in self.bt.time_pair_generator(
             min_date, max_date, list(processed_lists.keys()), processed_lists
         ):
@@ -257,6 +277,7 @@ class RollingBacktestRunner:
         if is_last_window:
             self.bt.handle_left_open(LocalTrade.bt_trades_open_pp, data=processed_lists)
 
+        _t_bt_done = _time.monotonic()
         self.bt.wallets.update()
         t1 = dt_now()
 
@@ -278,7 +299,7 @@ class RollingBacktestRunner:
         )
 
         logger.info(
-            "[window %s] %s -> %s | pairs=%s candles=%s trades=%s open=%s in %.2fs",
+            "[window %s] %s -> %s | pairs=%s candles=%s trades=%s open=%s | load=%.1fs ind=%.1fs bt=%.1fs total=%.2fs",
             window.index,
             min_date.strftime(DATETIME_PRINT_FORMAT),
             max_date.strftime(DATETIME_PRINT_FORMAT),
@@ -286,6 +307,9 @@ class RollingBacktestRunner:
             candles_total,
             len(LocalTrade.bt_trades),
             len(LocalTrade.bt_trades_open),
+            _t_load_done - _t_load,
+            _t_ind_done - _t_ind,
+            _t_bt_done - _t_bt,
             (t1 - t0).total_seconds(),
         )
 
@@ -435,13 +459,27 @@ class RollingBacktestRunner:
 
         started_at = dt_now()
         failed_count = 0
+        _window_times: list[float] = []
 
         for idx, window in enumerate(windows):
             try:
+                import time as _time
+                _wt0 = _time.monotonic()
                 self._run_single_window(
                     window=window,
                     is_last_window=(idx == len(windows) - 1),
                     signal_exporter=signal_exporter,
+                )
+                _wt1 = _time.monotonic()
+                _window_times.append(_wt1 - _wt0)
+                # Progress + ETA
+                pct = (idx + 1) / len(windows) * 100
+                avg_time = sum(_window_times) / len(_window_times)
+                remaining = avg_time * (len(windows) - idx - 1)
+                eta_min = remaining / 60
+                logger.info(
+                    "[%s] progress: %d/%d (%.1f%%) | avg=%.1fs/window | ETA=%.1fmin",
+                    strategy_name, idx + 1, len(windows), pct, avg_time, eta_min,
                 )
             except Exception as exc:  # noqa: BLE001
                 failed_count += 1

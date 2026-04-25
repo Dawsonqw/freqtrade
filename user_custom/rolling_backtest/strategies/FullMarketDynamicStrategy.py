@@ -61,13 +61,12 @@ class FullMarketDynamicStrategy(IStrategy):
     weight_liquidity = 0.3
     weight_adx = 0.3
 
-    # 排名缓存: {timestamp_key: set(pair_names)}
-    _rank_cache: dict = {}
-    _rank_cache_max = 200
+    # 预计算排名: {candle_timestamp: set(pair_names)}
+    _precomputed_ranks: dict = {}
 
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         """为每个 pair 计算交易信号指标"""
-        # 波动率相关 (用于本 pair 的入场过滤)
+        # 波动率相关 (用于本 pair 的入场过滤 + 全市场排名)
         dataframe["atr"] = ta.ATR(dataframe, timeperiod=14)
         dataframe["volatility_pct"] = dataframe["atr"] / dataframe["close"] * 100
         dataframe["volume_usd"] = dataframe["volume"] * dataframe["close"]
@@ -79,6 +78,58 @@ class FullMarketDynamicStrategy(IStrategy):
         dataframe["rsi"] = ta.RSI(dataframe, timeperiod=14)
 
         return dataframe
+
+    def advise_all_indicators(self, data: dict[str, DataFrame]) -> dict[str, DataFrame]:
+        """
+        Override: 先计算所有 pair 指标, 然后预计算每根K线的全市场排名.
+        这样 confirm_trade_entry 只需 O(1) 查缓存, 不再调 dp.get_pair_dataframe.
+        """
+        # Step 1: 正常计算各 pair 指标
+        result = super().advise_all_indicators(data)
+
+        # Step 2: 预计算全市场排名 (per candle timestamp) — 向量化
+        logger.info("Pre-computing market rankings across %d pairs...", len(result))
+        self._precomputed_ranks = {}
+
+        # 收集所有 pair 的排名数据 (向量化, 避免 iterrows)
+        frames = []
+        for pair, df in result.items():
+            if df is None or len(df) < 30:
+                continue
+            sub = df[["date", "volatility_pct", "volume_usd", "adx"]].dropna().copy()
+            sub = sub[(sub["volume_usd"] >= self.min_volume_usd) & (sub["volatility_pct"] > 0)]
+            if sub.empty:
+                continue
+            sub["pair"] = pair
+            sub["ts"] = sub["date"].astype(np.int64) // 10**6  # to unix timestamp (seconds)
+            frames.append(sub[["ts", "pair", "volatility_pct", "volume_usd", "adx"]])
+
+        if not frames:
+            logger.warning("No ranking data available — all pairs filtered out")
+            return result
+
+        scores_df = pd.concat(frames, ignore_index=True)
+        logger.info("Ranking data: %d rows across %d timestamps", len(scores_df), scores_df["ts"].nunique())
+
+        # 按时间分组，向量化排名
+        for ts, group in scores_df.groupby("ts"):
+            if len(group) <= self.top_n_pairs:
+                self._precomputed_ranks[int(ts)] = set(group["pair"].tolist())
+                continue
+            g = group.copy()
+            g["score"] = (
+                self.weight_volatility * g["volatility_pct"].rank(pct=True)
+                + self.weight_liquidity * g["volume_usd"].rank(pct=True)
+                + self.weight_adx * g["adx"].rank(pct=True)
+            )
+            top = g.nlargest(self.top_n_pairs, "score")
+            self._precomputed_ranks[int(ts)] = set(top["pair"].tolist())
+
+        logger.info(
+            "Market rankings pre-computed: %d timestamps",
+            len(self._precomputed_ranks),
+        )
+        return result
 
     @staticmethod
     def _calc_atr_pct(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 14) -> float:
@@ -255,13 +306,23 @@ class FullMarketDynamicStrategy(IStrategy):
         **kwargs,
     ) -> bool:
         """
-        动态选币过滤: 每笔交易入场前检查 pair 是否在全市场 top 20.
-        从 dp 获取原始 OHLCV 实时计算排名.
+        动态选币过滤: 使用预计算的排名 (O(1) 查缓存).
         """
-        top_pairs = self._compute_market_ranking(current_time)
-        if pair not in top_pairs:
-            return False
-        return True
+        ts_key = int(current_time.timestamp()) if hasattr(current_time, 'timestamp') else hash(current_time)
+        top_pairs = self._precomputed_ranks.get(ts_key, None)
+        if top_pairs is None:
+            # 尝试找最近的 timestamp (±15min = ±900s)
+            for offset in range(0, 901, 900):
+                for sign in (1, -1):
+                    check_ts = ts_key + sign * offset
+                    if check_ts in self._precomputed_ranks:
+                        top_pairs = self._precomputed_ranks[check_ts]
+                        break
+                if top_pairs is not None:
+                    break
+        if top_pairs is None:
+            return True  # 无排名数据时允许入场
+        return pair in top_pairs
 
     def custom_stake_amount(
         self,

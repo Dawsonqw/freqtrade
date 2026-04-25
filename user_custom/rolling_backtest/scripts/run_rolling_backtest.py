@@ -19,6 +19,8 @@ from freqtrade.optimize.backtesting import Backtesting
 
 from user_custom.rolling_backtest.src.rolling_runner import RollingBacktestRunner
 
+EXCHANGE_CACHE = Path("/data/freqtrade_data/_meta/exchange_cache.json")
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s | %(message)s",
@@ -105,6 +107,58 @@ def setup_file_logger(log_file: str | None) -> None:
     logging.getLogger().addHandler(fh)
 
 
+def inject_cached_markets(backtesting: Backtesting) -> None:
+    """Inject cached markets data to avoid slow network requests during init."""
+    pass  # Now handled by pre-init patching
+
+
+def patch_exchange_for_offline_init() -> None:
+    """Monkey-patch exchange to skip network calls during Backtesting init.
+    
+    Injects cached markets data so reload_markets() and fill_leverage_tiers()
+    don't need to hit the network.
+    """
+    if not EXCHANGE_CACHE.exists():
+        logger.warning("Exchange cache not found at %s, skipping offline patch", EXCHANGE_CACHE)
+        return
+
+    import time as _time
+    from freqtrade.exchange.exchange import Exchange
+
+    t0 = _time.time()
+    logger.info("Loading cached exchange data for offline init...")
+    with EXCHANGE_CACHE.open("r") as f:
+        cache = json.load(f)
+    cached_markets = cache.get("markets", {})
+    if not cached_markets:
+        logger.warning("Exchange cache has no markets, skipping offline patch")
+        return
+    logger.info("Loaded %d cached markets in %.1fs", len(cached_markets), _time.time() - t0)
+
+    _original_reload_markets = Exchange.reload_markets
+
+    def _patched_reload_markets(self, force=False, *, load_leverage_tiers=True):
+        """Skip first markets load — inject cached data instead."""
+        if self._last_markets_refresh == 0 and cached_markets:
+            logger.info("Injecting %d cached markets (skipping network)", len(cached_markets))
+            self._api.markets = cached_markets
+            self._api_async.markets = cached_markets
+            self._api.markets_by_id = self._api.index_by(list(cached_markets.values()), "id")
+            self._api_async.markets_by_id = self._api_async.index_by(list(cached_markets.values()), "id")
+            self._markets = cached_markets
+            self._last_markets_refresh = int(_time.time() * 1000)
+            # Still load leverage tiers from cache (handled by freqtrade's own cache mechanism)
+            if load_leverage_tiers:
+                from freqtrade.enums import TradingMode
+                if self.trading_mode == TradingMode.FUTURES:
+                    self.fill_leverage_tiers()
+            return
+        return _original_reload_markets(self, force, load_leverage_tiers=load_leverage_tiers)
+
+    Exchange.reload_markets = _patched_reload_markets
+    logger.info("Exchange patched for offline initialization")
+
+
 def load_pairs(path: str) -> list[str]:
     p = Path(path)
     if not p.exists():
@@ -147,8 +201,13 @@ def main() -> None:
     ns = parse_args()
     setup_file_logger(ns.log_file)
 
+    logger.info("=== Rolling Backtest Starting ===")
+    logger.info("Parsing configuration...")
     args = build_args(ns)
     config = setup_optimize_configuration(args, RunMode.BACKTEST)
+    # Re-add file logger after freqtrade's logging setup (which reconfigures root logger)
+    setup_file_logger(ns.log_file)
+    logger.info("Configuration loaded: timerange=%s, datadir=%s", ns.timerange, ns.datadir)
 
     if ns.pairs_file:
         pairs = load_pairs(ns.pairs_file)
@@ -159,7 +218,18 @@ def main() -> None:
         config["pairlists"] = [{"method": "StaticPairList"}]
         logger.info("Loaded pairs from file: %s", len(pairs))
 
+    # Patch exchange to use cached markets (skip network requests)
+    logger.info("Patching exchange for offline initialization...")
+    patch_exchange_for_offline_init()
+
+    logger.info("Initializing Backtesting engine (exchange + strategy)...")
+    import time as _time
+    t0 = _time.time()
     backtesting = Backtesting(config)
+    logger.info("Backtesting engine initialized in %.1fs (pairs=%d)", 
+                _time.time() - t0, len(backtesting.pairlists.whitelist))
+
+    logger.info("Creating RollingBacktestRunner (window_days=%s)...", ns.window_days)
     runner = RollingBacktestRunner(
         backtesting=backtesting,
         window_days=ns.window_days,
@@ -168,6 +238,7 @@ def main() -> None:
         min_window_days=ns.min_window_days,
         max_window_days=ns.max_window_days,
     )
+    logger.info("Starting rolling backtest run...")
     result = runner.run(
         output_json=Path(ns.output_json),
         fail_fast=ns.fail_fast,

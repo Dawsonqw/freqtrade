@@ -32,10 +32,17 @@ class PairAvailabilityFilter:
 
     def __init__(self, path: Path | str = DEFAULT_PATH) -> None:
         path = Path(path)
+        self.loaded = False
+        if not path.exists():
+            logger.warning("Pair availability file not found: %s — filter disabled", path)
+            self._pairs: dict[str, dict] = {}
+            self._generated_at = "N/A"
+            return
         with path.open("r", encoding="utf-8") as f:
             data = json.load(f)
-        self._pairs: dict[str, dict] = data.get("pairs", {})
+        self._pairs = data.get("pairs", {})
         self._generated_at = data.get("generated_at", "unknown")
+        self.loaded = bool(self._pairs)
         logger.info(
             "Loaded pair availability: %d pairs (generated %s)",
             len(self._pairs),
