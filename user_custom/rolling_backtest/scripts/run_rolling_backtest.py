@@ -94,6 +94,13 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Enable per-window performance metrics (Sharpe/Sortino/drawdown/win rate)",
     )
+    p.add_argument(
+        "--parallel-workers",
+        type=int,
+        default=0,
+        help="Number of parallel workers for indicator computation (0 = serial, default: 0). "
+             "Also enables data pre-loading to avoid repeated disk I/O across windows.",
+    )
     return p.parse_args()
 
 
@@ -237,6 +244,7 @@ def main() -> None:
         preferred_days=ns.preferred_days,
         min_window_days=ns.min_window_days,
         max_window_days=ns.max_window_days,
+        parallel_workers=ns.parallel_workers,
     )
     logger.info("Starting rolling backtest run...")
     result = runner.run(

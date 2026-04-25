@@ -3,6 +3,8 @@ from __future__ import annotations
 import gc
 import json
 import logging
+import time as _time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -67,6 +69,7 @@ class RollingBacktestRunner:
         preferred_days: int = 0,
         min_window_days: int = 7,
         max_window_days: int = 90,
+        parallel_workers: int = 0,
     ) -> None:
         self.bt = backtesting
         self.window_days = window_days
@@ -74,11 +77,218 @@ class RollingBacktestRunner:
         self.preferred_days = preferred_days
         self.min_window_days = min_window_days
         self.max_window_days = max_window_days
+        self.parallel_workers = parallel_workers
         self.window_plan: WindowPlan | None = None
         self.window_stats: list[WindowRunStat] = []
         self._dynamic_pairlist = self.bt.config.get("enable_dynamic_pairlist", False)
         self._pair_filter = PairAvailabilityFilter()
         self._original_whitelist = list(self.bt.pairlists.whitelist)
+        # Pre-loaded full-range data cache (populated by _preload_all_data)
+        self._preloaded_data: dict[str, DataFrame] | None = None
+
+    # ------------------------------------------------------------------ #
+    #  Optimisation: pre-load data once, slice per window                  #
+    # ------------------------------------------------------------------ #
+
+    def _preload_all_data(self, full_tr: TimeRange) -> None:
+        """Load OHLCV for the full timerange once and cache in memory.
+
+        Subsequent windows use _slice_preloaded_data() instead of disk I/O.
+        Also pre-computes tick_size per pair (expensive, avoids per-window re-computation).
+        """
+        t0 = _time.monotonic()
+        pairs = list(self._original_whitelist)
+        data = history.load_data(
+            datadir=self.bt.config["datadir"],
+            pairs=pairs,
+            timeframe=self.bt.timeframe,
+            timerange=full_tr,
+            startup_candles=self.bt.required_startup,
+            fail_without_data=False,
+            data_format=self.bt.config["dataformat_ohlcv"],
+            candle_type=self.bt.config.get("candle_type_def"),
+        )
+        t1 = _time.monotonic()
+        total_rows = sum(len(v) for v in data.values())
+        logger.info(
+            "Pre-loaded full-range data: %d pairs, %d rows in %.1fs",
+            len(data), total_rows, t1 - t0,
+        )
+
+        # Pre-compute tick_size for all pairs using thread pool
+        # (get_tick_size_over_time is CPU-bound with numpy/pandas but releases GIL enough)
+        t2 = _time.monotonic()
+        workers = max(self.parallel_workers, 1)
+        pair_list = list(data.keys())
+        df_copies = {p: data[p].copy() for p in pair_list}
+
+        from concurrent.futures import ProcessPoolExecutor
+        # Use ProcessPoolExecutor for true CPU parallelism
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            futures = {p: pool.submit(get_tick_size_over_time, df_copies[p]) for p in pair_list}
+            self._preloaded_tick_sizes: dict[str, object] = {}
+            for p in pair_list:
+                self._preloaded_tick_sizes[p] = futures[p].result()
+        del df_copies
+        t3 = _time.monotonic()
+        logger.info("Pre-computed tick sizes (%d workers): %d pairs in %.1fs", workers, len(data), t3 - t2)
+
+        self._preloaded_data = data
+
+    def _slice_preloaded_data(
+        self, tr: TimeRange, window: Window | None = None
+    ) -> dict[str, DataFrame]:
+        """Slice pre-loaded data for a specific window time range.
+
+        Much faster than loading from disk — just pandas boolean indexing.
+        """
+        import pandas as pd
+
+        assert self._preloaded_data is not None, "Call _preload_all_data first"
+
+        pairs = list(self._original_whitelist)
+        if window is not None and self._pair_filter.loaded:
+            original_count = len(pairs)
+            pairs = self._pair_filter.filter_pairs(
+                pairs,
+                window_start=window.start.strftime("%Y-%m-%d"),
+                window_end=window.end.strftime("%Y-%m-%d"),
+                timeframe=self.bt.timeframe,
+            )
+            if len(pairs) < original_count:
+                logger.info(
+                    "[window %s] pair availability filter: %d -> %d pairs",
+                    window.index, original_count, len(pairs),
+                )
+
+        # Convert timerange to datetime for slicing
+        start_dt = pd.Timestamp(tr.startdt) if tr.startdt else None
+        end_dt = pd.Timestamp(tr.stopdt) if tr.stopdt else None
+
+        result: dict[str, DataFrame] = {}
+        for pair in pairs:
+            if pair not in self._preloaded_data:
+                continue
+            df = self._preloaded_data[pair]
+            if df.empty:
+                continue
+            dates = df["date"]
+            if start_dt is not None and end_dt is not None:
+                mask = (dates >= start_dt) & (dates <= end_dt)
+            elif start_dt is not None:
+                mask = dates >= start_dt
+            elif end_dt is not None:
+                mask = dates <= end_dt
+            else:
+                mask = slice(None)
+            sliced = df.loc[mask]
+            if not sliced.empty:
+                result[pair] = sliced.copy()
+
+        # Update backtesting pair tracking — use cached tick_sizes
+        self.bt.price_pair_prec = {}
+        self.bt.available_pairs = []
+        for pair in result:
+            if hasattr(self, '_preloaded_tick_sizes') and pair in self._preloaded_tick_sizes:
+                self.bt.price_pair_prec[pair] = self._preloaded_tick_sizes[pair]
+            else:
+                self.bt.price_pair_prec[pair] = get_tick_size_over_time(result[pair])
+            self.bt.available_pairs.append(pair)
+        if result and self._pair_filter.loaded:
+            self.bt.pairlists._whitelist = list(result.keys())
+
+        return result
+
+    # ------------------------------------------------------------------ #
+    #  Optimisation: parallel indicator computation                        #
+    # ------------------------------------------------------------------ #
+
+    def _parallel_advise_all_indicators(
+        self, data: dict[str, DataFrame], workers: int
+    ) -> dict[str, DataFrame]:
+        """Compute indicators in parallel using threads.
+
+        TA-Lib releases the GIL during C computation, so threads give
+        real parallelism for the per-pair populate_indicators() calls.
+        The strategy's advise_all_indicators may have a post-processing
+        step (e.g. cross-pair ranking) that must run in the main thread.
+        We handle this by:
+        1. Parallel: call populate_indicators per pair (thread pool)
+        2. Serial: call the strategy's post-processing if it overrides
+           advise_all_indicators (detected by checking for _precomputed_ranks).
+        """
+        from freqtrade.strategy.strategy_wrapper import strategy_safe_wrapper
+
+        strategy = self.bt.strategy
+        pairs = list(data.keys())
+
+        def _compute_one(pair: str) -> tuple[str, DataFrame]:
+            pair_data = data[pair].copy()
+            result_df = strategy.advise_indicators(pair_data, {"pair": pair}).copy()
+            return pair, result_df
+
+        t0 = _time.monotonic()
+        result: dict[str, DataFrame] = {}
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for pair, df in pool.map(lambda p: _compute_one(p), pairs):
+                result[pair] = df
+        t1 = _time.monotonic()
+        logger.info(
+            "Parallel indicators (%d workers): %d pairs in %.1fs",
+            workers, len(result), t1 - t0,
+        )
+
+        # Post-processing: cross-pair ranking (strategy-specific)
+        if hasattr(strategy, '_precomputed_ranks'):
+            t2 = _time.monotonic()
+            # Call the strategy's ranking logic directly
+            strategy._precomputed_ranks = {}
+            self._compute_rankings(strategy, result)
+            t3 = _time.monotonic()
+            logger.info("Cross-pair ranking: %.1fs", t3 - t2)
+
+        return result
+
+    def _compute_rankings(self, strategy, result: dict[str, DataFrame]) -> None:
+        """Run the cross-pair ranking logic from FullMarketDynamicStrategy."""
+        import pandas as pd
+
+        frames = []
+        for pair, df in result.items():
+            if df is None or len(df) < 30:
+                continue
+            sub = df[["date", "volatility_pct", "volume_usd", "adx"]].dropna().copy()
+            min_vol = getattr(strategy, 'min_volume_usd', 100_000)
+            sub = sub[(sub["volume_usd"] >= min_vol) & (sub["volatility_pct"] > 0)]
+            if sub.empty:
+                continue
+            sub["pair"] = pair
+            sub["ts"] = sub["date"].astype("int64") // 10**6
+            frames.append(sub[["ts", "pair", "volatility_pct", "volume_usd", "adx"]])
+
+        if not frames:
+            return
+
+        scores_df = pd.concat(frames, ignore_index=True)
+        top_n = getattr(strategy, 'top_n_pairs', 30)
+        w_vol = getattr(strategy, 'weight_volatility', 0.4)
+        w_liq = getattr(strategy, 'weight_liquidity', 0.3)
+        w_adx = getattr(strategy, 'weight_adx', 0.3)
+
+        for ts, group in scores_df.groupby("ts"):
+            if len(group) <= top_n:
+                strategy._precomputed_ranks[int(ts)] = set(group["pair"].tolist())
+                continue
+            g = group.copy()
+            g["score"] = (
+                w_vol * g["volatility_pct"].rank(pct=True)
+                + w_liq * g["volume_usd"].rank(pct=True)
+                + w_adx * g["adx"].rank(pct=True)
+            )
+            top = g.nlargest(top_n, "score")
+            strategy._precomputed_ranks[int(ts)] = set(top["pair"].tolist())
+
+        logger.info("Rankings computed: %d timestamps", len(strategy._precomputed_ranks))
 
     def _refresh_pairlist_for_window(self, window: Window) -> list[str]:
         """Refresh pairlist at the start of each window (dynamic pairlist mode).
@@ -178,7 +388,6 @@ class RollingBacktestRunner:
         is_last_window: bool,
         signal_exporter: SignalExporter | None = None,
     ) -> None:
-        import time as _time
         t0 = dt_now()
         self.bt.timerange = window.timerange
 
@@ -191,7 +400,12 @@ class RollingBacktestRunner:
         # Extend data load range to cover open trades' entry points
         effective_tr = self._get_extended_timerange_for_open_trades(window)
         _t_load = _time.monotonic()
-        raw_data = self._load_window_data(effective_tr, window=window)
+
+        # Use pre-loaded data if available, otherwise load from disk
+        if self._preloaded_data is not None:
+            raw_data = self._slice_preloaded_data(effective_tr, window=window)
+        else:
+            raw_data = self._load_window_data(effective_tr, window=window)
         if not raw_data:
             t1 = dt_now()
             self.window_stats.append(
@@ -223,9 +437,12 @@ class RollingBacktestRunner:
             window.index, len(raw_data), _t_load_done - _t_load,
         )
 
-        # 1) indicators
+        # 1) indicators — parallel if workers > 0
         _t_ind = _time.monotonic()
-        preprocessed = self.bt.strategy.advise_all_indicators(raw_data)
+        if self.parallel_workers > 0:
+            preprocessed = self._parallel_advise_all_indicators(raw_data, self.parallel_workers)
+        else:
+            preprocessed = self.bt.strategy.advise_all_indicators(raw_data)
         _t_ind_done = _time.monotonic()
         logger.info(
             "[window %s] indicators computed: %.1fs",
@@ -457,13 +674,19 @@ class RollingBacktestRunner:
             self.bt.timerange.timerange_str,
         )
 
+        # Pre-load all data once if we have multiple windows
+        if len(windows) > 1:
+            logger.info("Pre-loading full-range data for all %d windows...", len(windows))
+            self._preload_all_data(self.bt.timerange)
+        else:
+            self._preloaded_data = None
+
         started_at = dt_now()
         failed_count = 0
         _window_times: list[float] = []
 
         for idx, window in enumerate(windows):
             try:
-                import time as _time
                 _wt0 = _time.monotonic()
                 self._run_single_window(
                     window=window,
@@ -506,6 +729,13 @@ class RollingBacktestRunner:
                     )
 
         ended_at = dt_now()
+
+        # Free pre-loaded data cache after all windows processed
+        if self._preloaded_data is not None:
+            del self._preloaded_data
+            self._preloaded_data = None
+            gc.collect()
+
         trades_df = trade_list_to_dataframe(LocalTrade.bt_trades)
         final_balance = self.bt.wallets.get_total(strat.config["stake_currency"])
 
