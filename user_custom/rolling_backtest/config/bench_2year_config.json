@@ -1,0 +1,57 @@
+{
+    "trading_mode": "futures",
+    "margin_mode": "isolated",
+    "stake_currency": "USDT",
+    "stake_amount": 100,
+    "dry_run_wallet": 10000,
+    "max_open_trades": 5,
+    "exchange": {
+        "name": "binance",
+        "key": "",
+        "secret": "",
+        "pair_whitelist": [
+            "BTC/USDT:USDT", "ETH/USDT:USDT", "BNB/USDT:USDT", "SOL/USDT:USDT",
+            "XRP/USDT:USDT", "DOGE/USDT:USDT", "ADA/USDT:USDT", "AVAX/USDT:USDT",
+            "DOT/USDT:USDT", "LINK/USDT:USDT", "UNI/USDT:USDT", "LTC/USDT:USDT",
+            "NEAR/USDT:USDT", "FIL/USDT:USDT", "ARB/USDT:USDT", "OP/USDT:USDT",
+            "ATOM/USDT:USDT", "APT/USDT:USDT", "SUI/USDT:USDT", "TRX/USDT:USDT",
+            "ETC/USDT:USDT", "AAVE/USDT:USDT", "INJ/USDT:USDT", "SEI/USDT:USDT",
+            "WIF/USDT:USDT", "ONDO/USDT:USDT", "ORDI/USDT:USDT", "WLD/USDT:USDT",
+            "JUP/USDT:USDT", "1000PEPE/USDT:USDT"
+        ],
+        "pair_blacklist": []
+    },
+    "entry_pricing": {
+        "price_side": "other",
+        "use_order_book": true,
+        "order_book_top": 1,
+        "price_last_balance": 0.0,
+        "check_depth_of_market": {
+            "enabled": false,
+            "bids_to_ask_delta": 1
+        }
+    },
+    "exit_pricing": {
+        "price_side": "other",
+        "use_order_book": true,
+        "order_book_top": 1
+    },
+    "pairlists": [
+        {"method": "StaticPairList"}
+    ],
+    "timeframe": "5m",
+    "datadir": "/data/freqtrade_data",
+    "strategy_path": "/root/workspace/freqtrade/user_custom/rolling_backtest/strategies",
+    "user_data_dir": "user_data",
+    "api_server": {
+        "enabled": true,
+        "listen_ip_address": "127.0.0.1",
+        "listen_port": 8080,
+        "verbosity": "error",
+        "enable_openapi": false,
+        "jwt_secret_key": "freqtrade_bench_2026",
+        "CORS_origins": ["http://localhost:8080"],
+        "username": "admin",
+        "password": "admin123"
+    }
+}
