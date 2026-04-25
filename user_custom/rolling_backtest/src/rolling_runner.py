@@ -146,9 +146,16 @@ class RollingBacktestRunner:
                     window.index, original_count, len(pairs),
                 )
 
-        # Convert timerange to datetime for slicing
+        # Convert timerange to datetime for slicing, extending start by startup candles
+        # so indicators have the same warm-up period as _load_window_data (which passes
+        # startup_candles=self.bt.required_startup to history.load_data).
         start_dt = pd.Timestamp(tr.startdt) if tr.startdt else None
         end_dt = pd.Timestamp(tr.stopdt) if tr.stopdt else None
+
+        if start_dt is not None and self.bt.required_startup > 0:
+            from freqtrade.exchange import timeframe_to_seconds
+            startup_secs = self.bt.required_startup * timeframe_to_seconds(self.bt.timeframe)
+            start_dt = start_dt - pd.Timedelta(seconds=startup_secs)
 
         result: dict[str, DataFrame] = {}
         for pair in pairs:
