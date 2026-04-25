@@ -9,22 +9,31 @@ def get_tick_size_over_time(candles: DataFrame) -> Series:
     :param candles: DataFrame with OHLCV data
     :return: Series with the average number of significant digits for each month
     """
+    # Downsample to daily before counting digits — tick_size is monthly,
+    # so daily resolution is more than enough and avoids per-row apply on
+    # 15m/5m data (96x–288x fewer rows).
+    if "date" in candles.columns:
+        indexed = candles.set_index("date", drop=False)
+    else:
+        indexed = candles
+    daily = indexed[["open", "high", "low", "close"]].resample("1D").agg(
+        {"open": "first", "high": "max", "low": "min", "close": "last"}
+    ).dropna()
+
     # count the number of significant digits for the open and close prices
     for col in ["open", "high", "low", "close"]:
-        candles[f"{col}_count"] = (
-            candles[col]
+        daily[f"{col}_count"] = (
+            daily[col]
             .apply(format_float_positional, precision=14, unique=False, fractional=False, trim="-")
             .str.extract(r"\.(\d*[1-9])")[0]
             .str.len()
         )
-    candles["max_count"] = candles[["open_count", "close_count", "high_count", "low_count"]].max(
+    daily["max_count"] = daily[["open_count", "close_count", "high_count", "low_count"]].max(
         axis=1
     )
 
-    candles1 = candles.set_index("date", drop=True)
-    # Group by month and calculate the average number of significant digits
-    monthly_count_avg1 = candles1["max_count"].resample("MS").max()
-    # monthly_open_count_avg
+    # Group by month and calculate the max number of significant digits
+    monthly_count_avg1 = daily["max_count"].resample("MS").max()
     # convert monthly_open_count_avg from 5.0 to 0.00001, 4.0 to 0.0001, ...
     monthly_open_count_avg = 1 / 10**monthly_count_avg1
 

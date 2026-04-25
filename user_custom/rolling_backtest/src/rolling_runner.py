@@ -115,23 +115,8 @@ class RollingBacktestRunner:
             len(data), total_rows, t1 - t0,
         )
 
-        # Pre-compute tick_size for all pairs using thread pool
-        # (get_tick_size_over_time is CPU-bound with numpy/pandas but releases GIL enough)
-        t2 = _time.monotonic()
-        workers = max(self.parallel_workers, 1)
-        pair_list = list(data.keys())
-        df_copies = {p: data[p].copy() for p in pair_list}
-
-        from concurrent.futures import ProcessPoolExecutor
-        # Use ProcessPoolExecutor for true CPU parallelism
-        with ProcessPoolExecutor(max_workers=workers) as pool:
-            futures = {p: pool.submit(get_tick_size_over_time, df_copies[p]) for p in pair_list}
-            self._preloaded_tick_sizes: dict[str, object] = {}
-            for p in pair_list:
-                self._preloaded_tick_sizes[p] = futures[p].result()
-        del df_copies
-        t3 = _time.monotonic()
-        logger.info("Pre-computed tick sizes (%d workers): %d pairs in %.1fs", workers, len(data), t3 - t2)
+        # Lazy tick_size cache — computed per-pair on first encounter in _slice
+        self._preloaded_tick_sizes: dict[str, object] = {}
 
         self._preloaded_data = data
 
@@ -185,14 +170,16 @@ class RollingBacktestRunner:
             if not sliced.empty:
                 result[pair] = sliced.copy()
 
-        # Update backtesting pair tracking — use cached tick_sizes
+        # Update backtesting pair tracking — lazy tick_size with cache
         self.bt.price_pair_prec = {}
         self.bt.available_pairs = []
         for pair in result:
-            if hasattr(self, '_preloaded_tick_sizes') and pair in self._preloaded_tick_sizes:
-                self.bt.price_pair_prec[pair] = self._preloaded_tick_sizes[pair]
-            else:
-                self.bt.price_pair_prec[pair] = get_tick_size_over_time(result[pair])
+            if pair not in self._preloaded_tick_sizes:
+                # First time seeing this pair — compute and cache
+                self._preloaded_tick_sizes[pair] = get_tick_size_over_time(
+                    self._preloaded_data[pair].copy()
+                )
+            self.bt.price_pair_prec[pair] = self._preloaded_tick_sizes[pair]
             self.bt.available_pairs.append(pair)
         if result and self._pair_filter.loaded:
             self.bt.pairlists._whitelist = list(result.keys())
