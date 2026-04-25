@@ -25,6 +25,7 @@ from freqtrade.util.datetime_helpers import dt_ts
 import numpy as np
 
 from .comparison_report import build_comparison_report, format_comparison_table
+from .pair_filter import PairAvailabilityFilter
 from .parity_tools import compute_trade_digest
 from .signal_export import SignalExporter
 from .window_metrics import WindowPerformance, compute_all_window_performances
@@ -76,6 +77,7 @@ class RollingBacktestRunner:
         self.window_plan: WindowPlan | None = None
         self.window_stats: list[WindowRunStat] = []
         self._dynamic_pairlist = self.bt.config.get("enable_dynamic_pairlist", False)
+        self._pair_filter = PairAvailabilityFilter()
 
     def _refresh_pairlist_for_window(self, window: Window) -> list[str]:
         """Refresh pairlist at the start of each window (dynamic pairlist mode).
@@ -97,10 +99,27 @@ class RollingBacktestRunner:
         )
         return whitelist
 
-    def _load_window_data(self, tr: TimeRange) -> dict[str, DataFrame]:
+    def _load_window_data(self, tr: TimeRange, window: Window | None = None) -> dict[str, DataFrame]:
+        pairs = self.bt.pairlists.whitelist
+        # Filter pairs by availability for this window's time range
+        if window is not None and self._pair_filter.loaded:
+            original_count = len(pairs)
+            pairs = self._pair_filter.filter_pairs(
+                pairs,
+                window_start=window.start.strftime("%Y-%m-%d"),
+                window_end=window.end.strftime("%Y-%m-%d"),
+                timeframe=self.bt.timeframe,
+            )
+            if len(pairs) < original_count:
+                logger.info(
+                    "[window %s] pair availability filter: %d -> %d pairs",
+                    window.index,
+                    original_count,
+                    len(pairs),
+                )
         data = history.load_data(
             datadir=self.bt.config["datadir"],
-            pairs=self.bt.pairlists.whitelist,
+            pairs=pairs,
             timeframe=self.bt.timeframe,
             timerange=tr,
             startup_candles=self.bt.required_startup,
@@ -164,7 +183,7 @@ class RollingBacktestRunner:
 
         # Extend data load range to cover open trades' entry points
         effective_tr = self._get_extended_timerange_for_open_trades(window)
-        raw_data = self._load_window_data(effective_tr)
+        raw_data = self._load_window_data(effective_tr, window=window)
         if not raw_data:
             t1 = dt_now()
             self.window_stats.append(
