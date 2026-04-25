@@ -32,7 +32,16 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--strategy", default=None, help="Override strategy name")
     p.add_argument("--strategy-list", nargs="+", default=None, help="List of strategies to compare")
     p.add_argument("--timerange", default=None, help="Override timerange")
-    p.add_argument("--window-days", type=int, default=14, help="Chunk size in days")
+    p.add_argument("--window-days", type=int, default=0,
+                    help="Chunk size in days (0 = auto-calculate based on memory and coverage)")
+    p.add_argument("--mem-budget-mb", type=float, default=0,
+                    help="Max memory per window in MB (0 = auto-detect 50%% free RAM)")
+    p.add_argument("--preferred-days", type=int, default=0,
+                    help="Hint for preferred window size when auto-calculating (0 = no preference)")
+    p.add_argument("--min-window-days", type=int, default=7,
+                    help="Minimum window size in days for auto mode (default: 7)")
+    p.add_argument("--max-window-days", type=int, default=90,
+                    help="Maximum window size in days for auto mode (default: 90)")
     p.add_argument("--datadir", default="/data/freqtrade_data", help="OHLCV data directory")
     p.add_argument("--user-data-dir", default="/root/workspace/freqtrade/user_data", help="freqtrade user_data directory")
     p.add_argument("--pairs-file", default=None, help="CSV/TXT with pair list")
@@ -151,7 +160,14 @@ def main() -> None:
         logger.info("Loaded pairs from file: %s", len(pairs))
 
     backtesting = Backtesting(config)
-    runner = RollingBacktestRunner(backtesting=backtesting, window_days=ns.window_days)
+    runner = RollingBacktestRunner(
+        backtesting=backtesting,
+        window_days=ns.window_days,
+        mem_budget_mb=ns.mem_budget_mb,
+        preferred_days=ns.preferred_days,
+        min_window_days=ns.min_window_days,
+        max_window_days=ns.max_window_days,
+    )
     result = runner.run(
         output_json=Path(ns.output_json),
         fail_fast=ns.fail_fast,

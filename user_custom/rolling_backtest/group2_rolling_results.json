@@ -1,0 +1,91 @@
+{
+  "windows": [
+    {
+      "window": 0,
+      "range": "20240701-20240731",
+      "trades": 3235,
+      "profit": -642.766,
+      "elapsed": 9.3
+    },
+    {
+      "window": 1,
+      "range": "20240731-20240830",
+      "trades": 3492,
+      "profit": -830.785,
+      "elapsed": 22.9
+    },
+    {
+      "window": 2,
+      "range": "20240830-20240929",
+      "trades": 3104,
+      "profit": -631.449,
+      "elapsed": 21.3
+    },
+    {
+      "window": 3,
+      "range": "20240929-20241029",
+      "trades": 3202,
+      "profit": -663.233,
+      "elapsed": 21.0
+    },
+    {
+      "window": 4,
+      "range": "20241029-20241128",
+      "trades": 3588,
+      "profit": -265.831,
+      "elapsed": 21.7
+    },
+    {
+      "window": 5,
+      "range": "20241128-20241228",
+      "trades": 3745,
+      "profit": -794.052,
+      "elapsed": 22.8
+    },
+    {
+      "window": 6,
+      "range": "20241228-20250127",
+      "trades": 3270,
+      "profit": -711.016,
+      "elapsed": 21.5
+    },
+    {
+      "window": 7,
+      "range": "20250127-20250226",
+      "trades": 3308,
+      "profit": -873.847,
+      "elapsed": 21.6
+    },
+    {
+      "window": 8,
+      "range": "20250226-20250328",
+      "trades": 3416,
+      "profit": -811.872,
+      "elapsed": 21.9
+    },
+    {
+      "window": 9,
+      "range": "20250328-20250427",
+      "trades": 3531,
+      "profit": -831.486,
+      "elapsed": 22.8
+    },
+    {
+      "window": 10,
+      "range": "20250427-20250527",
+      "trades": 3105,
+      "profit": -542.695,
+      "elapsed": 21.6
+    },
+    {
+      "window": 11,
+      "range": "20250527-20250626",
+      "trades": 3180,
+      "profit": -616.286,
+      "elapsed": 21.2
+    }
+  ],
+  "total_trades": 40176,
+  "total_profit": -8215.318,
+  "total_time": 249.6
+}

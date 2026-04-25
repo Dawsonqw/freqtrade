@@ -1,0 +1,91 @@
+{
+  "max_open_trades": 5,
+  "stake_currency": "USDT",
+  "stake_amount": 200,
+  "tradable_balance_ratio": 0.99,
+  "dry_run": true,
+  "dry_run_wallet": 10000,
+  "fiat_display_currency": "USD",
+  "timeframe": "5m",
+  "trading_mode": "futures",
+  "margin_mode": "isolated",
+  "candle_type_def": "futures",
+  "cancel_open_orders_on_exit": false,
+  "unfilledtimeout": {
+    "entry": 5,
+    "exit": 5,
+    "exit_timeout_count": 0,
+    "unit": "minutes"
+  },
+  "entry_pricing": {
+    "price_side": "same",
+    "use_order_book": true,
+    "order_book_top": 1,
+    "price_last_balance": 0.0,
+    "check_depth_of_market": {
+      "enabled": false,
+      "bids_to_ask_delta": 1
+    }
+  },
+  "exit_pricing": {
+    "price_side": "same",
+    "use_order_book": true,
+    "order_book_top": 1
+  },
+  "dataformat_ohlcv": "feather",
+  "exchange": {
+    "name": "binance",
+    "key": "",
+    "secret": "",
+    "ccxt_config": {
+      "enableRateLimit": true,
+      "options": {
+        "defaultType": "future"
+      }
+    },
+    "pair_whitelist": [
+      "1000SHIB/USDT:USDT",
+      "ETC/USDT:USDT",
+      "HBAR/USDT:USDT",
+      "BCH/USDT:USDT",
+      "XLM/USDT:USDT",
+      "GRT/USDT:USDT",
+      "TRX/USDT:USDT",
+      "SAND/USDT:USDT",
+      "MANA/USDT:USDT",
+      "SUSHI/USDT:USDT",
+      "COMP/USDT:USDT",
+      "ZEC/USDT:USDT",
+      "EGLD/USDT:USDT",
+      "THETA/USDT:USDT",
+      "NEO/USDT:USDT",
+      "ENJ/USDT:USDT",
+      "ANKR/USDT:USDT",
+      "KSM/USDT:USDT",
+      "1INCH/USDT:USDT",
+      "DASH/USDT:USDT",
+      "STORJ/USDT:USDT",
+      "CHZ/USDT:USDT",
+      "VET/USDT:USDT",
+      "KAVA/USDT:USDT",
+      "SKL/USDT:USDT",
+      "ZRX/USDT:USDT",
+      "BEL/USDT:USDT",
+      "MTL/USDT:USDT",
+      "BAND/USDT:USDT",
+      "TRB/USDT:USDT"
+    ],
+    "pair_blacklist": []
+  },
+  "pairlists": [
+    {
+      "method": "StaticPairList"
+    }
+  ],
+  "datadir": "/data/freqtrade_data",
+  "strategy": "FrameworkBenchStrategy",
+  "strategy_path": "/root/workspace/freqtrade/user_custom/rolling_backtest/strategies",
+  "user_data_dir": "/root/workspace/freqtrade/user_data",
+  "timerange": "20240701-20250701",
+  "disableparamexport": true
+}

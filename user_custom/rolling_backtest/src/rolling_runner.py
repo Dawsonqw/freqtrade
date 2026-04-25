@@ -28,7 +28,7 @@ from .comparison_report import build_comparison_report, format_comparison_table
 from .parity_tools import compute_trade_digest
 from .signal_export import SignalExporter
 from .window_metrics import WindowPerformance, compute_all_window_performances
-from .windowing import Window, build_windows
+from .windowing import Window, WindowPlan, build_windows
 
 
 logger = logging.getLogger(__name__)
@@ -57,9 +57,23 @@ class RollingBacktestRunner:
     - Frees dataframe memory after each window.
     """
 
-    def __init__(self, backtesting: Backtesting, window_days: int) -> None:
+    def __init__(
+        self,
+        backtesting: Backtesting,
+        window_days: int = 0,
+        *,
+        mem_budget_mb: float = 0,
+        preferred_days: int = 0,
+        min_window_days: int = 7,
+        max_window_days: int = 90,
+    ) -> None:
         self.bt = backtesting
         self.window_days = window_days
+        self.mem_budget_mb = mem_budget_mb
+        self.preferred_days = preferred_days
+        self.min_window_days = min_window_days
+        self.max_window_days = max_window_days
+        self.window_plan: WindowPlan | None = None
         self.window_stats: list[WindowRunStat] = []
         self._dynamic_pairlist = self.bt.config.get("enable_dynamic_pairlist", False)
 
@@ -380,10 +394,15 @@ class RollingBacktestRunner:
             output_dir = Path(self.bt.config.get("user_data_dir", "user_data")) / "backtest_results"
             signal_exporter = SignalExporter(output_dir / f"signals_{strategy_name}")
 
-        windows = build_windows(
+        windows, self.window_plan = build_windows(
             self.bt.timerange,
             timeframe=self.bt.timeframe,
             window_days=self.window_days,
+            num_pairs=len(self.bt.pairlists.whitelist),
+            mem_budget_mb=self.mem_budget_mb,
+            preferred_days=self.preferred_days,
+            min_window_days=self.min_window_days,
+            max_window_days=self.max_window_days,
         )
         if not windows:
             raise RuntimeError(f"No windows generated for strategy {strategy_name}.")
